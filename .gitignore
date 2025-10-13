@@ -1,0 +1,4 @@
+# Ignore model folder
+*.bin
+*.model
+dify/docker

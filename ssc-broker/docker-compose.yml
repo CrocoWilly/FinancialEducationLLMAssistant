@@ -1,0 +1,21 @@
+version: "3.9"
+services:
+  broker:
+    build: .
+    container_name: broker
+    environment:
+      - UPSTREAM_LLM_BASE=http://100.86.83.90:8000/v1
+      - BROKER_MAX_INFLIGHT=16
+      - RATE_LIMIT_SECONDS=0
+      - QUEUE_WAIT_TIMEOUT=60
+    networks:
+      - dify_net
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+networks:
+  dify_net:
+    external: true
+    name: docker_default
+
