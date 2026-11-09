@@ -1,5 +1,7 @@
 # Financial Education LLM Assistant
 
+[![tests](https://github.com/CrocoWilly/FinancialEducationLLMAssistant/actions/workflows/tests.yml/badge.svg)](https://github.com/CrocoWilly/FinancialEducationLLMAssistant/actions/workflows/tests.yml)
+
 A Traditional-Chinese financial Q&A assistant: a web/mobile chat UI on AWS, answering in real time from a 7B financial LLM running on a home GPU.
 
 ## TL;DR
@@ -87,6 +89,8 @@ finally:
 
 **Fix.** Each request owns exactly one slot, wrapped in an idempotent `release()`. Non-stream requests release it in `finally`. Streams release it when the generator finishes, with a background-task fallback in case the client disconnects before streaming starts. The same test now shows the peak stays at 4 and throughput at ~197 tok/s, and extra requests queue as expected.
 
+**Regression tests.** Both failure modes are now pytest cases that run in CI (see [Testing](#testing)). Run against the original `broker.py`, they fail with `assert 6 == 2` (stream cap bypassed) and `assert 1 == 2` (slots leaked).
+
 ## Performance
 
 **Broker overhead.** Measured with [`benchmark/bench.py`](benchmark/bench.py) against the mock upstream (60 tok/s, 200 ms TTFT), 256 tokens per request, cap 64, everything on one Apple M4 machine:
@@ -122,9 +126,27 @@ kill %1 %2
 
 The output is streamed in Traditional Chinese, converted by the broker from the mock's Simplified text. For production deployment and configuration, see [`ssc-broker/README.md`](ssc-broker/README.md). For GPU benchmarking, see [`benchmark/README.md`](benchmark/README.md).
 
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+20 tests in [`tests/test_broker.py`](tests/test_broker.py) run in about 10 s and need no GPU. GitHub Actions runs them on every push and pull request. Each test starts a real broker and mock vLLM on free local ports and talks to them over HTTP, so streaming, timeouts and disconnects go through the same code paths as in production.
+
+| Area | What is checked |
+|---|---|
+| Protocol | Dify probe answered locally, model name forced, `/health` |
+| Language | input 繁→簡, output 簡→繁 (stream and non-stream) |
+| Concurrency | cap never exceeded; slots returned after normal completion, upstream errors and client disconnects; `503` when the queue is full |
+| Failures | `502` unreachable upstream, upstream status passed through, `504` timeout, SSE error event on mid-stream timeout |
+| Rate limit | `429` inside the window |
+
+To check that the tests actually catch bugs, I ran them against the original `broker.py` (11 of 20 fail, each matching a known bug). I also deliberately broke each slot-release path in the fixed broker; every one of those changes is caught by at least one test.
+
 ## Limitations & next steps
 
-- **Tests:** the broker is verified with the scripts in `benchmark/`, which have not yet been turned into pytest regression tests with CI.
 - **GPU benchmark:** re-measure single-stream speed and a concurrency sweep on a 24 GB GPU with `bench.py`.
 - **Retries:** failed upstream calls are not retried. A retry is only safe before streaming starts.
 - **Rate limiting** is in-memory per process. Running more than one broker instance would need Redis.
@@ -135,13 +157,15 @@ The output is streamed in Traditional Chinese, converted by the broker from the 
 ```
 ssc-broker/          FastAPI broker (my code): broker.py, Dockerfile, docker-compose.yml
 benchmark/           bench.py load tester + mock_upstream.py fake vLLM
+tests/               pytest suite for the broker (runs in CI)
+.github/workflows/   GitHub Actions: run pytest on every push / PR
 models/ssc-finllm-model/   model config & tokenizer files (weights not committed)
 doc_image/           demo screenshot & video
 ```
 
 ## Tech stack
 
-Python · FastAPI · httpx · asyncio · SSE · OpenCC · Docker · AWS EC2 (Ubuntu 22.04) · Tailscale · vLLM · Dify
+Python · FastAPI · httpx · asyncio · SSE · OpenCC · pytest · GitHub Actions · Docker · AWS EC2 (Ubuntu 22.04) · Tailscale · vLLM · Dify
 
 ## References
 

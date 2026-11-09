@@ -13,6 +13,7 @@ Endpoints:
     POST /v1/chat/completions   (stream / non-stream, honours max_tokens and
                                  stream_options.include_usage)
     GET  /stats                 current / peak in-flight requests, totals
+                                (MOCK_FAIL_STATUS=500 makes every chat request fail)
     POST /stats/reset
 """
 import asyncio
@@ -28,12 +29,21 @@ TOKENS_PER_SEC = float(os.getenv("MOCK_TOKENS_PER_SEC", "60"))
 TTFT_MS = float(os.getenv("MOCK_TTFT_MS", "200"))
 DEFAULT_MAX_TOKENS = int(os.getenv("MOCK_DEFAULT_MAX_TOKENS", "256"))
 MODEL = os.getenv("MOCK_MODEL", "ssc-FinLLM")
+# If non-zero, every chat request fails with this HTTP status (for error-path tests).
+FAIL_STATUS = int(os.getenv("MOCK_FAIL_STATUS", "0"))
 
 # Simplified Chinese on purpose, so the broker's 简→繁 conversion is exercised.
 VOCAB = list("股票债券基金风险收益资产负债利率通货膨胀投资组合分散价格市场经济银行")
 
 app = FastAPI()
 stats = {"inflight": 0, "peak_inflight": 0, "total": 0, "completed": 0}
+last_request: dict = {}  # body of the most recent chat request, as received
+
+
+def reset():
+    """Clear all counters and the recorded request (used between tests)."""
+    stats.update(inflight=0, peak_inflight=0, total=0, completed=0)
+    last_request.clear()
 
 
 def _enter():
@@ -67,6 +77,10 @@ async def reset_stats():
 @app.post("/v1/chat/completions")
 async def chat(req: Request):
     body = await req.json()
+    last_request.clear()
+    last_request.update(body)
+    if FAIL_STATUS:
+        return JSONResponse({"error": {"message": "mock failure"}}, status_code=FAIL_STATUS)
     n_tokens = int(body.get("max_tokens") or DEFAULT_MAX_TOKENS)
     stream = bool(body.get("stream", False))
     include_usage = bool((body.get("stream_options") or {}).get("include_usage"))

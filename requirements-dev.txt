@@ -1,0 +1,3 @@
+-r ssc-broker/requirements.txt
+-r benchmark/requirements.txt
+pytest
