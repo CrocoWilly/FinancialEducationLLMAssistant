@@ -4,6 +4,7 @@
 
 A Traditional-Chinese financial Q&A assistant: a web/mobile chat UI on AWS, answering in real time from a 7B financial LLM running on a home GPU.
 
+
 ## TL;DR
 
 **Solo project.** I designed, deployed, and tested the whole pipeline. Dify (chat UI and orchestration), vLLM (inference) and the ssc-FinLLM model are off-the-shelf; **the FastAPI broker that connects them and the benchmark tooling are my code.**
@@ -58,8 +59,11 @@ vLLM accepts every request and queues internally. On a single 24 GB consumer GPU
 **Why Tailscale between EC2 and the home PC?**
 The GPU machine needs no public port or router configuration. Traffic goes through an encrypted WireGuard tunnel, and EC2 reaches the PC at a stable private address. Running the GPU at home avoids paying for a cloud GPU around the clock.
 
+**Who can reach the GPU?**
+The broker only needs to be reachable by Dify, which talks to it over the Docker network, so its port is published on `127.0.0.1` only. On top of that, `/v1/*` requires a shared API key (`Authorization: Bearer …`, compared with `hmac.compare_digest` to avoid timing leaks), checked before rate limiting and before a concurrency slot is taken, so unauthenticated traffic never queues for the GPU. `docker compose` refuses to start without a key.
+
 **Timeouts and failure modes.**
-Connect and read timeouts are separate. The read timeout applies *between chunks*, so a long but healthy stream isn't cut off, while a stalled one is. Errors map to distinct statuses: `502` when vLLM is unreachable, `504` on timeout, `503` when the queue is full, `429` when rate-limited. If vLLM fails mid-stream, the client gets a final SSE error event. When a client disconnects, the slot is still released (verified by test).
+Connect and read timeouts are separate. The read timeout applies *between chunks*, so a long but healthy stream isn't cut off, while a stalled one is. Errors map to distinct statuses: `502` when vLLM is unreachable, `504` on timeout, `503` when the queue is full, `429` when rate-limited, `401` without a valid key. If vLLM fails mid-stream, the client gets a final SSE error event. When a client disconnects, the slot is still released (verified by test).
 
 ## Case study: a concurrency cap that didn't cap
 
@@ -133,7 +137,7 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-21 tests in [`tests/test_broker.py`](tests/test_broker.py) run in about 10 s and need no GPU. GitHub Actions runs them on every push and pull request. Each test starts a real broker and mock vLLM on free local ports and talks to them over HTTP, so streaming, timeouts and disconnects go through the same code paths as in production.
+31 tests in [`tests/test_broker.py`](tests/test_broker.py) run in about 15 s and need no GPU. GitHub Actions runs them on every push and pull request. Each test starts a real broker and mock vLLM on free local ports and talks to them over HTTP, so streaming, timeouts and disconnects go through the same code paths as in production. The logging tests go one step further and launch `uvicorn` as a separate process, because a missing log handler only shows up there.
 
 | Area | What is checked |
 |---|---|
@@ -142,8 +146,10 @@ pytest -v
 | Concurrency | cap never exceeded; slots returned after normal completion, upstream errors and client disconnects; over-release raises instead of silently raising the cap; `503` when the queue is full |
 | Failures | `502` unreachable upstream, upstream status passed through, `504` timeout, SSE error event on mid-stream timeout |
 | Rate limit | `429` inside the window |
+| Auth | `401` without / with a wrong key on `/v1/*`; correct key accepted; `/health` and Dify probe stay open; rejected requests never reach the GPU or take a slot |
+| Logging | request log lines and the missing-key warning actually appear in uvicorn's output |
 
-To check that the tests actually catch bugs, I ran them against the original `broker.py` (12 of 21 fail, each matching a known bug). I also deliberately broke each slot-release path in the fixed broker; every one of those changes is caught by at least one test.
+To check that the tests actually catch bugs, I ran them against the original `broker.py` (19 of 31 fail, each matching a known bug or a feature it lacked). I also deliberately broke each slot-release path, the API-key check and the log handler in the fixed broker; every one of those changes is caught by at least one test.
 
 ## Limitations & next steps
 

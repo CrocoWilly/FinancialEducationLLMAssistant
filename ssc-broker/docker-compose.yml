@@ -5,6 +5,7 @@ services:
     container_name: broker
     environment:
       - UPSTREAM_LLM_BASE=${UPSTREAM_LLM_BASE:?set UPSTREAM_LLM_BASE in ssc-broker/.env}
+      - BROKER_API_KEY=${BROKER_API_KEY:?set BROKER_API_KEY in ssc-broker/.env}
       - BROKER_MAX_INFLIGHT=16
       - RATE_LIMIT_SECONDS=0
       - QUEUE_WAIT_TIMEOUT=60
@@ -12,8 +13,10 @@ services:
       - UPSTREAM_READ_TIMEOUT=120
     networks:
       - dify_net
+    # Dify reaches the broker over the Docker network (http://broker:8080/v1).
+    # Publish only on the host loopback so it is not reachable from the internet.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     restart: unless-stopped
 
 networks:

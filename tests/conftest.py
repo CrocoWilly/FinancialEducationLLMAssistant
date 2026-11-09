@@ -76,7 +76,8 @@ def start_broker(monkeypatch):
     servers = []
 
     def _start(upstream_url, *, max_inflight=4, queue_timeout=5.0,
-               read_timeout=10.0, rate_limit=0.0):
+               read_timeout=10.0, rate_limit=0.0, api_key=""):
+        monkeypatch.setattr(broker, "API_KEY", api_key, raising=False)
         monkeypatch.setattr(broker, "UP", upstream_url + "/v1")
         monkeypatch.setattr(broker, "MAX_INF", max_inflight)
         # Same semaphore class the broker uses, just with a test-sized cap.

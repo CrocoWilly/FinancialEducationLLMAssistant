@@ -4,6 +4,11 @@ Tests for ssc-broker. Each test starts a real broker in front of a mock vLLM
 """
 import asyncio
 import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -39,10 +44,11 @@ def read_stream(response) -> tuple[str, list[dict]]:
     return "".join(parts), events
 
 
-def chat(base_url, *, stream, **kwargs) -> tuple[int, str, list[dict]]:
+def chat(base_url, *, stream, api_key=None, **kwargs) -> tuple[int, str, list[dict]]:
     """Send one chat request; return (status code, answer text, SSE events)."""
     body = chat_body(stream=stream, **kwargs)
-    with httpx.Client(timeout=30) as client:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    with httpx.Client(timeout=30, headers=headers) as client:
         if not stream:
             r = client.post(f"{base_url}/chat/completions", json=body)
             text = r.json()["choices"][0]["message"]["content"] if r.status_code == 200 else ""
@@ -206,3 +212,88 @@ def test_second_request_within_rate_limit_window_returns_429(upstream, start_bro
     base = start_broker(upstream.url, rate_limit=10)
     assert chat(base, stream=False)[0] == 200
     assert chat(base, stream=False)[0] == 429
+
+
+# ---------- API key ----------
+
+KEY = "test-secret-key"
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
+def test_chat_without_api_key_is_rejected_when_key_is_configured(upstream, start_broker, stream):
+    base = start_broker(upstream.url, api_key=KEY)
+    assert chat(base, stream=stream)[0] == 401
+    assert mock_upstream.stats["total"] == 0          # never reached the GPU
+
+
+def test_chat_with_wrong_api_key_is_rejected(upstream, start_broker):
+    base = start_broker(upstream.url, api_key=KEY)
+    assert chat(base, stream=False, api_key="wrong-key")[0] == 401
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
+def test_chat_with_correct_api_key_is_accepted(upstream, start_broker, stream):
+    base = start_broker(upstream.url, api_key=KEY)
+    assert chat(base, stream=stream, api_key=KEY)[0] == 200
+
+
+def test_models_endpoint_requires_api_key(upstream, start_broker):
+    base = start_broker(upstream.url, api_key=KEY)
+    assert httpx.get(f"{base}/models").status_code == 401
+    assert httpx.get(f"{base}/models", headers={"Authorization": f"Bearer {KEY}"}).status_code == 200
+
+
+def test_health_and_dify_probe_do_not_require_api_key(upstream, start_broker):
+    base = start_broker(upstream.url, api_key=KEY)
+    assert httpx.get(base.removesuffix("/v1") + "/health").status_code == 200
+    assert httpx.get(f"{base}/chat/completions").status_code == 200
+    assert httpx.head(f"{base}/chat/completions").status_code == 200
+
+
+def test_rejected_requests_do_not_use_concurrency_slots(upstream, start_broker):
+    base = start_broker(upstream.url, api_key=KEY, max_inflight=1, queue_timeout=0.2)
+    for _ in range(3):
+        assert chat(base, stream=False)[0] == 401
+    assert chat(base, stream=False, api_key=KEY)[0] == 200
+
+
+# ---------- logging (real uvicorn process, as in production) ----------
+
+def run_broker_process(upstream_url, extra_env=None) -> str:
+    """Start `uvicorn broker:app` as a subprocess, send one chat request, return its output."""
+    port = free_port()
+    env = dict(os.environ)
+    env.pop("BROKER_API_KEY", None)          # don't inherit a key from the developer's shell
+    env.update({"UPSTREAM_LLM_BASE": upstream_url + "/v1", **(extra_env or {})})
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "broker:app", "--port", str(port)],
+        cwd=Path(broker.__file__).parent, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        base = f"http://127.0.0.1:{port}"
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                httpx.get(f"{base}/health")
+                break
+            except httpx.ConnectError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
+        key = (extra_env or {}).get("BROKER_API_KEY")
+        assert chat(f"{base}/v1", stream=False, api_key=key)[0] == 200
+    finally:
+        proc.terminate()
+        output = proc.communicate(timeout=10)[0]
+    return output
+
+
+def test_request_log_lines_appear_in_server_output(upstream):
+    output = run_broker_process(upstream.url, {"BROKER_API_KEY": KEY})
+    assert "proxy → " in output
+
+
+def test_startup_warns_when_api_key_is_not_set(upstream):
+    output = run_broker_process(upstream.url)
+    assert "BROKER_API_KEY is not set" in output

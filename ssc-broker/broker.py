@@ -1,8 +1,8 @@
-import os, time, asyncio, orjson, logging
+import os, time, asyncio, orjson, logging, hmac
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from opencc import OpenCC
 from starlette.background import BackgroundTask
@@ -29,8 +29,17 @@ last_req: Dict[str, float] = {}
 # 而不是默默讓上限變大
 sem = asyncio.BoundedSemaphore(MAX_INF)
 
+# 呼叫 /v1/* 需要的 API key（Authorization: Bearer <key>）；空字串 = 不驗證
+API_KEY = os.getenv("BROKER_API_KEY", "")
+
+# 自己掛 handler：uvicorn 只設定它自己的 logger，否則 broker 的 INFO log 會被丟掉
 log = logging.getLogger("broker")
 log.setLevel(logging.INFO)
+if not log.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s broker: %(message)s"))
+    log.addHandler(_handler)
+    log.propagate = False
 
 client: httpx.AsyncClient  # 在 lifespan 中建立，所有請求共用連線池
 
@@ -38,6 +47,8 @@ client: httpx.AsyncClient  # 在 lifespan 中建立，所有請求共用連線�
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global client
+    if not API_KEY:
+        log.warning("BROKER_API_KEY is not set: /v1/* accepts requests without authentication")
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(
             connect=UP_CONNECT_TIMEOUT, read=UP_READ_TIMEOUT,
@@ -94,6 +105,17 @@ def _upstream_error(status: int, detail: str) -> JSONResponse:
     return JSONResponse({"error": f"upstream_error: {detail}"}, status_code=status)
 
 
+def require_api_key(req: Request):
+    """FastAPI dependency：API_KEY 有設定時，要求 Authorization: Bearer <API_KEY>。"""
+    if not API_KEY:
+        return
+    scheme, _, token = req.headers.get("Authorization", "").partition(" ")
+    # compare_digest：比對時間不隨「前面幾個字元相同」而變，避免 timing attack
+    if scheme.lower() != "bearer" or not hmac.compare_digest(token.encode(), API_KEY.encode()):
+        raise HTTPException(status_code=401, detail="invalid or missing API key",
+                            headers={"WWW-Authenticate": "Bearer"})
+
+
 app = FastAPI(lifespan=lifespan)
 
 # ---------- 健康檢查 ----------
@@ -103,7 +125,7 @@ async def health():
             "max_inflight": MAX_INF}
 
 # ---------- 轉發：/v1/models ----------
-@app.get("/v1/models")
+@app.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models():
     try:
         r = await client.get(_up("/models"))
@@ -260,11 +282,11 @@ async def _chat_impl(req: Request):
         slot.release()
 
 # v1 路徑（Dify 會用）
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_v1(req: Request):
     return await _chat_impl(req)
 
 # 非 v1 路徑（保險：其他工具可能打這條）
-@app.post("/chat/completions")
+@app.post("/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_alias(req: Request):
     return await _chat_impl(req)
