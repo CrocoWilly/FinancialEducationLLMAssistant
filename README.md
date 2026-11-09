@@ -4,12 +4,13 @@
 
 A Traditional-Chinese financial Q&A assistant: a web/mobile chat UI on AWS, answering in real time from a 7B financial LLM running on a home GPU.
 
+> **Status:** ran in September 2025 and was used by 10 people ([numbers below](#in-production-september-2025)). The GPU machine has since been retired, so the live deployment is offline; the demo video, the broker, and its tests remain.
 
 ## TL;DR
 
 **Solo project.** I designed, deployed, and tested the whole pipeline. Dify (chat UI and orchestration), vLLM (inference) and the ssc-FinLLM model are off-the-shelf; **the FastAPI broker that connects them and the benchmark tooling are my code.**
 
-- **Cloud-to-home streaming pipeline.** Dify on AWS EC2 → my broker → Tailscale → vLLM on a local RTX 3090, with tokens streamed end to end over SSE (~62 tok/s observed on one stream).
+- **Cloud-to-home streaming pipeline.** Dify on AWS EC2 → my broker → Tailscale → vLLM on a local RTX 3090, with tokens streamed end to end over SSE (median ~61 tok/s per answer across 59 real answers).
 - **Low-overhead broker.** At 50 concurrent streams it adds ≤ ~10 ms to time-to-first-token (p95), with 0 errors and no per-stream slowdown, while converting every chunk from Simplified to Traditional Chinese.
 - **Found and fixed a concurrency bug by load testing.** The original semaphore logic let streams bypass the cap entirely and leaked slots on idle, dropping throughput from ~197 to 66 tok/s. I reproduced it with a mock upstream, fixed it, and verified the fix with the same test. [Details ↓](#case-study-a-concurrency-cap-that-didnt-cap)
 
@@ -40,7 +41,7 @@ flowchart LR
 
 | Component | Role | Source |
 |---|---|---|
-| Dify v1.8.1 | Chat UI, conversation handling, prompt workflow; configured with the broker as an "OpenAI-API-compatible" model provider | [langgenius/dify@1.8.1](https://github.com/langgenius/dify/tree/1.8.1), standard Docker deployment |
+| Dify v1.8.1 | Chat UI, conversation handling, the chatflow (retrieval → LLM → answer); configured with the broker as an "OpenAI-API-compatible" model provider | [langgenius/dify@1.8.1](https://github.com/langgenius/dify/tree/1.8.1), standard Docker deployment |
 | **ssc-broker** | Protocol adapter, 繁↔簡 conversion, concurrency control, timeouts, error mapping | **[`ssc-broker/`](ssc-broker/)** |
 | vLLM | Serves the model over an OpenAI-compatible API with token streaming | [vllm-project/vllm](https://github.com/vllm-project/vllm) |
 | ssc-FinLLM 7B | Chinese financial LLM (InternLM2 architecture, FP16) | [haidizym/ssc-FinLLM](https://github.com/haidizym/ssc-FinLLM) |
@@ -64,6 +65,16 @@ The broker only needs to be reachable by Dify, which talks to it over the Docker
 
 **Timeouts and failure modes.**
 Connect and read timeouts are separate. The read timeout applies *between chunks*, so a long but healthy stream isn't cut off, while a stalled one is. Errors map to distinct statuses: `502` when vLLM is unreachable, `504` on timeout, `503` when the queue is full, `429` when rate-limited, `401` without a valid key. If vLLM fails mid-stream, the client gets a final SSE error event. When a client disconnects, the slot is still released (verified by test).
+
+## Chatflow and knowledge retrieval
+
+The Dify app 「金融知識小幫手」 is a chatflow: **start → knowledge retrieval → LLM → answer**.
+
+- **Knowledge:** three personal-finance course notes (introduction, time value of money, annuities), split into 262 chunks. Retrieval is Dify's *economy* mode, a keyword index without embeddings, returning the top 4 chunks.
+- **LLM step:** ssc-FinLLM through the broker, temperature 0.7, max 512 tokens, with the retrieved chunks injected into the system prompt.
+- **System prompt rules:** answer in Traditional Chinese, step by step; show the assumptions and steps for any calculation; if the retrieved excerpts don't support an answer, say 「資料不足」 and list what information is missing; no investment solicitation, return guarantees, or stock tips.
+
+**What went wrong with vector search.** I first built a second knowledge base in *high-quality* mode with `text-embedding-3-large`. All three documents failed to index with `404 {"detail": "Not Found"}`. That body is FastAPI's default 404, which points to the cause: Dify's `OPENAI_API_BASE` was set to the broker, so the embedding calls most likely went to the broker, which only implements chat endpoints. I switched to the keyword-indexed knowledge base, which is what the app ran with. The fix for vector search would be to point embeddings at a real embedding endpoint, or add `/v1/embeddings` to the broker.
 
 ## Case study: a concurrency cap that didn't cap
 
@@ -95,6 +106,20 @@ finally:
 
 **Regression tests.** Both failure modes are now pytest cases that run in CI (see [Testing](#testing)). Run against the original `broker.py`, they fail with `assert 6 == 2` (stream cap bypassed) and `assert 1 == 2` (slots leaked).
 
+## In production (September 2025)
+
+Numbers from the deployment's Dify database and broker log, recovered before the server was shut down:
+
+| Metric | Value |
+|---|---|
+| Users / conversations / answers | 10 / 20 / 61, over 2 days (2025-09-26 and 27) |
+| Broker chat requests | 75, all `200` |
+| Answer latency (LLM call) | median 4.98 s, p90 7.08 s |
+| Generation speed per answer | median 61.2 tok/s (59 answers) |
+| Peak concurrent generations | 2 |
+
+Generation speed is answer tokens ÷ LLM latency. The token counts are Dify's own estimate, not the model's tokenizer, so the speed is approximate. The median matches what I saw during development, and a 7B FP16 model on an RTX 3090 is memory-bandwidth-bound at roughly that speed. Real traffic never exceeded 2 concurrent generations, so the concurrency behaviour is covered by the broker benchmarks and tests below rather than by production load.
+
 ## Performance
 
 **Broker overhead.** Measured with [`benchmark/bench.py`](benchmark/bench.py) against the mock upstream (60 tok/s, 200 ms TTFT), 256 tokens per request, cap 64, everything on one Apple M4 machine:
@@ -108,7 +133,7 @@ finally:
 
 The broker is not the bottleneck. System capacity is bounded by GPU throughput.
 
-**Model speed.** ~62 tok/s on a single stream, observed on the RTX 3090 during development. A reproducible GPU sweep is listed under next steps.
+**Model speed.** Median ~61 tok/s per answer in production on the RTX 3090 (see above). A controlled GPU sweep with `bench.py` is listed under next steps.
 
 ## Quickstart (no GPU needed)
 
@@ -153,11 +178,11 @@ To check that the tests actually catch bugs, I ran them against the original `br
 
 ## Limitations & next steps
 
-- **GPU benchmark:** re-measure single-stream speed and a concurrency sweep on a 24 GB GPU with `bench.py`.
+- **GPU benchmark:** the production speed comes from Dify's approximate token counts; a controlled single-stream and concurrency sweep on a 24 GB GPU with `bench.py` would replace it. The original GPU machine is retired, so this needs a rented GPU.
 - **Retries:** failed upstream calls are not retried. A retry is only safe before streaming starts.
 - **Rate limiting:** the broker only sees Dify's IP, so its per-IP limit would throttle all users together; it is off by default. Per-user limits should be set in Nginx (which sees client IPs; its config lives in the Dify deployment on EC2, not in this repo) or in Dify. The limiter's per-IP table is also in-memory and never pruned.
 - **Multiple workers / instances:** the concurrency cap and rate limit are per process, so N uvicorn workers allow N × `BROKER_MAX_INFLIGHT`. A shared cap would need Redis or similar.
-- **Reproducibility:** the Dify deployment config and the exact vLLM launch command weren't committed. A suggested vLLM command is in `benchmark/README.md`.
+- **Reproducibility:** Dify ran as the stock 1.8.1 Docker deployment with two changes: `OPENAI_API_BASE=http://broker:8080` in `.env`, and `extra_hosts: host.docker.internal:host-gateway` on the `api`, `worker` and `worker_beat` services. The exact vLLM launch command wasn't recorded; a suggested one is in `benchmark/README.md`.
 
 ## Repository structure
 
