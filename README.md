@@ -4,7 +4,7 @@
 
 A Traditional-Chinese financial Q&A assistant: a web/mobile chat UI on AWS, answering in real time from a 7B financial LLM running on a home GPU.
 
-> **Status:** ran in September 2025 and was used by 10 people ([numbers below](#in-production-september-2025)). The GPU machine has since been retired, so the live deployment is offline; the demo video, the broker, and its tests remain.
+> **Status:** ran in September 2025 and was used by 8 people ([numbers below](#in-production-september-2025)). The GPU machine has since been retired, so the live deployment is offline; the demo video, the broker, and its tests remain.
 
 ## TL;DR
 
@@ -112,7 +112,9 @@ Numbers from the deployment's Dify database and broker log, recovered before the
 
 | Metric | Value |
 |---|---|
-| Users / conversations / answers | 10 / 20 / 61, over 2 days (2025-09-26 and 27) |
+| Test accounts / users who asked questions | 10 / 8 |
+| Conversations / answers | 20 / 61, over 2 days (2025-09-26 and 27) |
+| Most users active at the same time | 2 within any 5 min, 3 within any 15 min |
 | Broker chat requests | 75, all `200` |
 | Answer latency (LLM call) | median 4.98 s, p90 7.08 s |
 | Generation speed per answer | median 61.2 tok/s (59 answers) |
