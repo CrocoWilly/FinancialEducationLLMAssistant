@@ -25,7 +25,9 @@ cc_t2s = OpenCC("t2s")
 cc_s2t = OpenCC("s2twp")
 
 last_req: Dict[str, float] = {}
-sem = asyncio.Semaphore(MAX_INF)
+# Bounded：若名額被多還（release 次數超過 acquire），直接丟 ValueError，
+# 而不是默默讓上限變大
+sem = asyncio.BoundedSemaphore(MAX_INF)
 
 log = logging.getLogger("broker")
 log.setLevel(logging.INFO)

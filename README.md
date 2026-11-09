@@ -87,7 +87,7 @@ finally:
 
 **Lesson.** Peak in-flight alone looked healthy in the non-stream case. Only throughput exposed the leak.
 
-**Fix.** Each request owns exactly one slot, wrapped in an idempotent `release()`. Non-stream requests release it in `finally`. Streams release it when the generator finishes, with a background-task fallback in case the client disconnects before streaming starts. The same test now shows the peak stays at 4 and throughput at ~197 tok/s, and extra requests queue as expected.
+**Fix.** Each request owns exactly one slot, wrapped in an idempotent `release()`, and the semaphore is an `asyncio.BoundedSemaphore`, so any future double release raises `ValueError` instead of silently raising the cap. Non-stream requests release it in `finally`. Streams release it when the generator finishes, with a background-task fallback in case the client disconnects before streaming starts. The same test now shows the peak stays at 4 and throughput at ~197 tok/s, and extra requests queue as expected.
 
 **Regression tests.** Both failure modes are now pytest cases that run in CI (see [Testing](#testing)). Run against the original `broker.py`, they fail with `assert 6 == 2` (stream cap bypassed) and `assert 1 == 2` (slots leaked).
 
@@ -133,23 +133,24 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-20 tests in [`tests/test_broker.py`](tests/test_broker.py) run in about 10 s and need no GPU. GitHub Actions runs them on every push and pull request. Each test starts a real broker and mock vLLM on free local ports and talks to them over HTTP, so streaming, timeouts and disconnects go through the same code paths as in production.
+21 tests in [`tests/test_broker.py`](tests/test_broker.py) run in about 10 s and need no GPU. GitHub Actions runs them on every push and pull request. Each test starts a real broker and mock vLLM on free local ports and talks to them over HTTP, so streaming, timeouts and disconnects go through the same code paths as in production.
 
 | Area | What is checked |
 |---|---|
 | Protocol | Dify probe answered locally, model name forced, `/health` |
 | Language | input 繁→簡, output 簡→繁 (stream and non-stream) |
-| Concurrency | cap never exceeded; slots returned after normal completion, upstream errors and client disconnects; `503` when the queue is full |
+| Concurrency | cap never exceeded; slots returned after normal completion, upstream errors and client disconnects; over-release raises instead of silently raising the cap; `503` when the queue is full |
 | Failures | `502` unreachable upstream, upstream status passed through, `504` timeout, SSE error event on mid-stream timeout |
 | Rate limit | `429` inside the window |
 
-To check that the tests actually catch bugs, I ran them against the original `broker.py` (11 of 20 fail, each matching a known bug). I also deliberately broke each slot-release path in the fixed broker; every one of those changes is caught by at least one test.
+To check that the tests actually catch bugs, I ran them against the original `broker.py` (12 of 21 fail, each matching a known bug). I also deliberately broke each slot-release path in the fixed broker; every one of those changes is caught by at least one test.
 
 ## Limitations & next steps
 
 - **GPU benchmark:** re-measure single-stream speed and a concurrency sweep on a 24 GB GPU with `bench.py`.
 - **Retries:** failed upstream calls are not retried. A retry is only safe before streaming starts.
-- **Rate limiting** is in-memory per process. Running more than one broker instance would need Redis.
+- **Rate limiting:** the broker only sees Dify's IP, so its per-IP limit would throttle all users together; it is off by default. Per-user limits should be set in Nginx (which sees client IPs; its config lives in the Dify deployment on EC2, not in this repo) or in Dify. The limiter's per-IP table is also in-memory and never pruned.
+- **Multiple workers / instances:** the concurrency cap and rate limit are per process, so N uvicorn workers allow N × `BROKER_MAX_INFLIGHT`. A shared cap would need Redis or similar.
 - **Reproducibility:** the Dify deployment config and the exact vLLM launch command weren't committed. A suggested vLLM command is in `benchmark/README.md`.
 
 ## Repository structure

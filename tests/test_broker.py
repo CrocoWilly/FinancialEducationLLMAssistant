@@ -8,6 +8,7 @@ import json
 import httpx
 import pytest
 
+import broker
 import mock_upstream
 from conftest import free_port
 
@@ -127,6 +128,14 @@ def test_slots_are_returned_when_requests_finish_together(upstream, start_broker
     mock_upstream.reset()
     chat_concurrently(base, 2, stream=stream)        # second wave should still run in parallel
     assert mock_upstream.stats["peak_inflight"] == 2
+
+
+def test_releasing_more_slots_than_the_cap_raises():
+    # A double release must fail loudly instead of silently raising the cap
+    # (that silent drift is exactly how the original stream bug hid).
+    sem = type(broker.sem)(1)
+    with pytest.raises(ValueError):
+        sem.release()
 
 
 def test_full_queue_returns_503(upstream, start_broker):

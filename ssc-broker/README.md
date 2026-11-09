@@ -20,10 +20,14 @@ Set via environment variables. `docker-compose.yml` values override the `Dockerf
 | `UPSTREAM_LLM_BASE` | from `.env` | `http://127.0.0.1:8000/v1` | vLLM base URL, must include `/v1`, no trailing slash |
 | `DEFAULT_MODEL` | – | `ssc-FinLLM` (in code) | Model name forced on every request |
 | `BROKER_MAX_INFLIGHT` | `16` | `8` | Max concurrent upstream requests |
-| `RATE_LIMIT_SECONDS` | `0` (off) | `10` | Min seconds between requests per client IP |
+| `RATE_LIMIT_SECONDS` | `0` (off) | `0` (off) | Min seconds between requests per client IP — keep off behind Dify (see below) |
 | `QUEUE_WAIT_TIMEOUT` | `60` | `45` | Seconds to wait for a concurrency slot |
 | `UPSTREAM_CONNECT_TIMEOUT` | `10` | `10` | Seconds to connect to vLLM |
 | `UPSTREAM_READ_TIMEOUT` | `120` | `120` | Max seconds between two reads from vLLM (per chunk when streaming) |
+
+## Note on rate limiting
+
+The per-IP limit keys on the address of whoever connects to the broker. Behind Dify that is always the Dify API container, so every user shares one key and `RATE_LIMIT_SECONDS=10` would mean *one request per 10 s for the whole system*. That's why it is off by default. Per-user limits belong in the layer that sees real client IPs: Nginx (`limit_req_zone $binary_remote_addr ...`) or Dify itself.
 
 ## Error responses
 

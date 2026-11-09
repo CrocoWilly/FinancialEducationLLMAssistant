@@ -8,7 +8,6 @@ through the same code paths as in production (uvicorn, streaming, timeouts):
 
 Servers are started fresh for each test, so no state leaks between tests.
 """
-import asyncio
 import socket
 import threading
 import time
@@ -80,7 +79,8 @@ def start_broker(monkeypatch):
                read_timeout=10.0, rate_limit=0.0):
         monkeypatch.setattr(broker, "UP", upstream_url + "/v1")
         monkeypatch.setattr(broker, "MAX_INF", max_inflight)
-        monkeypatch.setattr(broker, "sem", asyncio.Semaphore(max_inflight))
+        # Same semaphore class the broker uses, just with a test-sized cap.
+        monkeypatch.setattr(broker, "sem", type(broker.sem)(max_inflight))
         monkeypatch.setattr(broker, "Q_TIMEOUT", queue_timeout)
         monkeypatch.setattr(broker, "UP_READ_TIMEOUT", read_timeout, raising=False)
         monkeypatch.setattr(broker, "RL_SECS", rate_limit)
