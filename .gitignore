@@ -2,3 +2,10 @@
 *.bin
 *.model
 dify/docker
+
+# Python
+__pycache__/
+*.pyc
+
+# Local env
+.env

@@ -9,6 +9,7 @@ ENV UPSTREAM_LLM_BASE=http://127.0.0.1:8000/v1 \
     BROKER_MAX_INFLIGHT=8 \
     RATE_LIMIT_SECONDS=10 \
     QUEUE_WAIT_TIMEOUT=45 \
-    OPENCC_USER_DICT=/app/opencc_user.txt
+    UPSTREAM_CONNECT_TIMEOUT=10 \
+    UPSTREAM_READ_TIMEOUT=120
 EXPOSE 8080
 CMD ["uvicorn","broker:app","--host","0.0.0.0","--port","8080"]

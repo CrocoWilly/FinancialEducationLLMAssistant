@@ -4,10 +4,12 @@ services:
     build: .
     container_name: broker
     environment:
-      - UPSTREAM_LLM_BASE=http://100.86.83.90:8000/v1
+      - UPSTREAM_LLM_BASE=${UPSTREAM_LLM_BASE:?set UPSTREAM_LLM_BASE in ssc-broker/.env}
       - BROKER_MAX_INFLIGHT=16
       - RATE_LIMIT_SECONDS=0
       - QUEUE_WAIT_TIMEOUT=60
+      - UPSTREAM_CONNECT_TIMEOUT=10
+      - UPSTREAM_READ_TIMEOUT=120
     networks:
       - dify_net
     ports:
