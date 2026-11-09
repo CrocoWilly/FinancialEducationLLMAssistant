@@ -1,180 +1,151 @@
-# 💰 Financial Education LLM Assistant (Fin-LLM Platform)
+# Financial Education LLM Assistant
 
-### 🧠 Project Overview  
-A **cloud-based financial education assistant** powered by a **fine-tuned Chinese financial LLM**, designed to provide domain-specific question answering, tutoring, and data interpretation in real time.  
+A Traditional-Chinese financial Q&A assistant: a web/mobile chat UI on AWS, answering in real time from a 7B financial LLM running on a home GPU.
 
-The system integrates **Dify (as the frontend orchestration framework)**, **FastAPI-based broker service**, and **a local Ollama/vLLM instance** serving the **ssc-FinLLM (7B, FP16)** model.
+## TL;DR
 
-It is fully **deployed on AWS EC2**, accessible from web and mobile browsers.
+**Solo project.** I designed, deployed, and tested the whole pipeline. Dify (chat UI and orchestration), vLLM (inference) and the ssc-FinLLM model are off-the-shelf; **the FastAPI broker that connects them and the benchmark tooling are my code.**
 
-> A complete cloud-to-local LLM integration pipeline for financial education — enabling low-latency, real-time Chinese financial query responses.
+- **Cloud-to-home streaming pipeline.** Dify on AWS EC2 → my broker → Tailscale → vLLM on a local RTX 3090, with tokens streamed end to end over SSE (~62 tok/s observed on one stream).
+- **Low-overhead broker.** At 50 concurrent streams it adds ≤ ~10 ms to time-to-first-token (p95), with 0 errors and no per-stream slowdown, while converting every chunk from Simplified to Traditional Chinese.
+- **Found and fixed a concurrency bug by load testing.** The original semaphore logic let streams bypass the cap entirely and leaked slots on idle, dropping throughput from ~197 to 66 tok/s. I reproduced it with a mock upstream, fixed it, and verified the fix with the same test. [Details ↓](#case-study-a-concurrency-cap-that-didnt-cap)
 
----
-<!-- #### User Interface -->
-<!-- ![alt text](./doc_image/UI.png) -->
-<!-- <img src="./doc_image/UI.png" alt="User Interface" width="1000"> -->
+## Demo
 
-### ▶️ Real-time Demo Video (Click below image to see the demo video❗)
-Video URL: https://reurl.cc/EQx22R
+[![Demo video](./doc_image/UI.png)](https://drive.google.com/file/d/13gUPVPvrnMjAFcjswvMSbEEROo9Srip6/view?usp=sharing)
 
-[![Real-time Demo Video ](./doc_image/UI.png)](https://drive.google.com/file/d/13gUPVPvrnMjAFcjswvMSbEEROo9Srip6/view?usp=sharing)
-<!-- <video width="1000" controls>
-  <source src="./doc_image/demo_video.mp4" type="video/mp4">
-  你的瀏覽器不支援影片播放。
-</video> -->
+Click the screenshot to watch the real-time demo ([short link](https://reurl.cc/EQx22R)).
 
+## Architecture
 
----
+```mermaid
+flowchart LR
+    U[Browser<br/>web / mobile] -->|HTTPS| D
 
-### ⚙️ System Architecture  
+    subgraph EC2[AWS EC2 · Docker]
+        D[Dify v1.8.1<br/>Nginx + UI + API] -->|OpenAI-compatible<br/>HTTP + SSE| B[ssc-broker<br/>FastAPI · my code]
+    end
 
-```text
-[User: Web / Mobile Browser]
-        │  HTTPS (80/443, WebSocket/SSE)
-        ▼
-[EC2 Nginx (Dify/Docker)]
-        │  Reverse proxy → /api /console
-        ▼
-[Dify Web / Dify API Service]
-        │  1) Workflow orchestration & UI logic
-        │  2) Optional: Knowledge base recall (RAG)
-        │       ├─> [VectorDB: pgvector / Weaviate]
-        │       └─> Retrieve Top-K snippets → Inject into prompt
-        │
-        │  3) Calls OpenAI-compatible API via custom API Base
-        ▼  HTTP(S)/SSE (OpenAI-compatible)
-[Broker (EC2:8080)]
-        │  A) Forwarding & Protocol Alignment:
-        │     - /v1/models
-        │     - /v1/chat/completions  (stream/non-stream)
-        │  B) Optional: 繁↔簡 translation pipeline
-        │  C) Retry / Timeout / Error wrapping
-        ▼  HTTP(S)
-[Tailscale / Intranet]
-        ▼
-[Local PC vLLM Server (port 8000)]
-        │  - Loads ssc-FinLLM (7B, FP16, RTX 3090)
-        │  - Handles Tokenizer / KV Cache / Inference
-        │  - Streams tokens (SSE)
-        ▼
-<────────── token chunks（SSE）return via Broker ──────────
-        ▲
-[Broker translates back (if needed) and sends to Dify]
-        ▲
-[Dify API → Frontend (Web/App)]
-        ▲
-[EC2 Nginx → HTTPS Response]
-        ▲
-[User sees real-time LLM output]
+    B -->|Tailscale<br/>private tunnel| V
+
+    subgraph PC[Home PC · RTX 3090]
+        V[vLLM<br/>ssc-FinLLM 7B FP16]
+    end
+
+    V -.->|token stream| B -.->|簡→繁 per chunk| D -.-> U
 ```
 
-*(Diagram above illustrates full cloud-to-local streaming pipeline.)*
+| Component | Role | Source |
+|---|---|---|
+| Dify v1.8.1 | Chat UI, conversation handling, prompt workflow; configured with the broker as an "OpenAI-API-compatible" model provider | [langgenius/dify@1.8.1](https://github.com/langgenius/dify/tree/1.8.1), standard Docker deployment |
+| **ssc-broker** | Protocol adapter, 繁↔簡 conversion, concurrency control, timeouts, error mapping | **[`ssc-broker/`](ssc-broker/)** |
+| vLLM | Serves the model over an OpenAI-compatible API with token streaming | [vllm-project/vllm](https://github.com/vllm-project/vllm) |
+| ssc-FinLLM 7B | Chinese financial LLM (InternLM2 architecture, FP16) | [haidizym/ssc-FinLLM](https://github.com/haidizym/ssc-FinLLM) |
 
----
+## Design decisions
 
-### 💡 Key Features  
-- Integrated **Dify**, **FastAPI Broker**, and **local vLLM/Ollama** into a seamless workflow  
-- **Deployed full stack on AWS EC2**, including Docker-based Nginx reverse proxy  
-- Implemented **streaming token inference (SSE)** for real-time LLM responses  
-- Supported **繁體↔簡體 translation** pipeline for Traditional Chinese user experience  
-- Designed a **modular backend** supporting scalable RAG extensions  
-- Delivered a **production-ready service** accessible via mobile and desktop browsers  
+**Why a broker instead of pointing Dify straight at vLLM?**
+Dify and vLLM don't quite fit together. Dify probes the endpoint with `GET /v1/chat/completions` when you add a model, and vLLM answers 404. Dify may also send other model names (e.g. `gpt-4o-mini`) that vLLM doesn't serve. The broker answers the probe itself and forces the model name. It also gives me one place for language conversion and for protecting the GPU, without modifying either project.
 
----
+**Why convert 繁→簡 on input and 簡→繁 on output?**
+ssc-FinLLM is a Simplified-Chinese model, but the users read Traditional Chinese. Input is converted with OpenCC `t2s`; output uses `s2twp`, which also maps vocabulary to Taiwan usage (e.g. 软件 → 軟體), not just characters. Output is converted **per SSE chunk**, so streaming stays real-time instead of waiting for the full answer.
 
-### 🧩 Tech Stack  
+**Why cap concurrency in the broker when vLLM already batches requests?**
+vLLM accepts every request and queues internally. On a single 24 GB consumer GPU, too many concurrent sequences compete for KV-cache memory and every user slows down. A semaphore in the broker (`BROKER_MAX_INFLIGHT`) bounds how much work reaches the GPU. Requests beyond the cap wait in a queue with a timeout and then get a fast `503` with `Retry-After`, instead of hanging.
 
-| Category | Tools & Frameworks |
-|-----------|--------------------|
-| LLM Engine | vLLM / Ollama (ssc-FinLLM 7B FP16) |
-| Frontend / Orchestration | Dify |
-| Backend | FastAPI, Nginx, Broker |
-| Cloud | AWS EC2 (Ubuntu 22.04) |
-| Networking | Tailscale (intranet tunneling) |
-| Database | pgvector / Weaviate (for RAG) |
-| Communication | WebSocket, Server-Sent Events (SSE) |
+**Why Tailscale between EC2 and the home PC?**
+The GPU machine needs no public port or router configuration. Traffic goes through an encrypted WireGuard tunnel, and EC2 reaches the PC at a stable private address. Running the GPU at home avoids paying for a cloud GPU around the clock.
 
----
+**Timeouts and failure modes.**
+Connect and read timeouts are separate. The read timeout applies *between chunks*, so a long but healthy stream isn't cut off, while a stalled one is. Errors map to distinct statuses: `502` when vLLM is unreachable, `504` on timeout, `503` when the queue is full, `429` when rate-limited. If vLLM fails mid-stream, the client gets a final SSE error event. When a client disconnects, the slot is still released (verified by test).
 
-### 📊 Results & Demo  
-- **Deployment:** AWS EC2 + Local GPU (RTX 3090)  
-- **Token Speed:** ~62 tokens/sec  
-- **Concurrent Users:** 20-50 simulated  
-- **Latency:** Sub-second streaming response per token  
+## Case study: a concurrency cap that didn't cap
 
----
+**Symptom found in review.** The original broker released its semaphore slot with:
 
-### 🧭 What I Learned  
-- Familiar with **Dify framework** for low-code LLM app orchestration  
-- Built full-stack **LLM deployment pipeline (frontend → backend → inference)**  
-- Learned **FastAPI + Broker architecture** for OpenAI-compatible API forwarding  
-- Integrated **local GPU inference** (vLLM / Ollama) with **cloud services**  
-- Gained hands-on experience with **RAG, vector DBs, and translation pipelines**  
+```python
+finally:
+    if sem.locked():   # only true when the count is exactly 0
+        sem.release()
+```
 
----
+**Reproduction.** I wrote a mock vLLM ([`benchmark/mock_upstream.py`](benchmark/mock_upstream.py)) that streams at a fixed 60 tok/s and records how many requests it is serving at once. Because the upstream speed is fixed, any change in the numbers comes from the broker. Setup: cap = 4, ~1.2 s per request, a fresh broker and mock process for every cell, and non-stream cells repeated 3× with identical results.
 
-### 📂 Repository Structure 
+| Clients | Before — stream<br/>peak in-flight | Before — non-stream<br/>peak / throughput | After — stream<br/>peak in-flight | After — non-stream<br/>peak / throughput |
+|---|---|---|---|---|
+| 4  | 4 | 4 / **66 tok/s** ⚠️ | 4 | 4 / 197 tok/s |
+| 8  | **8** ❌ | 4 / 194 tok/s | 4 | 4 / 197 tok/s |
+| 16 | **16** ❌ | 4 / 194 tok/s | 4 | 4 / 197 tok/s |
 
-#### Repository Structure on AWS
+*With the cap working, throughput should be about 4 slots × 60 tok/s ≈ 197 tok/s.*
+
+**Root cause: two opposite failures.**
+- **Stream: the cap was never enforced.** The handler returns a `StreamingResponse` immediately, so the `finally` runs *before* streaming starts and releases the slot early. The generator then releases it again. Every client got through.
+- **Non-stream: slots leaked when nobody was queued.** A slot was returned only if the count happened to be 0. When 4 requests finished together with no one waiting, 3 slots were lost and the broker dropped to one request at a time. Under constant overload it looked fine. In production, every lull in traffic would leak slots until the broker was permanently serialized.
+
+**Lesson.** Peak in-flight alone looked healthy in the non-stream case. Only throughput exposed the leak.
+
+**Fix.** Each request owns exactly one slot, wrapped in an idempotent `release()`. Non-stream requests release it in `finally`. Streams release it when the generator finishes, with a background-task fallback in case the client disconnects before streaming starts. The same test now shows the peak stays at 4 and throughput at ~197 tok/s, and extra requests queue as expected.
+
+## Performance
+
+**Broker overhead.** Measured with [`benchmark/bench.py`](benchmark/bench.py) against the mock upstream (60 tok/s, 200 ms TTFT), 256 tokens per request, cap 64, everything on one Apple M4 machine:
+
+| Concurrent streams | Errors | TTFT p95: direct → via broker | Per-stream tok/s | Aggregate tok/s |
+|---|---|---|---|---|
+| 1  | 0 | 0.23 s → 0.23 s | 60.0 | 57 |
+| 16 | 0 | 0.22 s → 0.22 s | 60.0 | 915 |
+| 32 | 0 | 0.22 s → 0.23 s | 60.0 | 1,828 |
+| 50 | 0 | 0.23 s → 0.24 s | 60.0 | 2,848 |
+
+The broker is not the bottleneck. System capacity is bounded by GPU throughput.
+
+**Model speed.** ~62 tok/s on a single stream, observed on the RTX 3090 during development. A reproducible GPU sweep is listed under next steps.
+
+## Quickstart (no GPU needed)
+
+Runs the broker against the mock upstream and load-tests it:
+
 ```bash
-financial-education-helper/
-│
-├── dify/                        # Main orchestration & frontend (Docker)
-│   ├── web/                     # Web UI & workflow definition
-│   ├── api/                     # REST API service
-│   ├── sdks/                    # SDKs for model access
-│   ├── docker/                  # Docker environment configs
-│   ├── images/                  # Docker images & setup scripts
-│   ├── LICENSE / Makefile       # Base project setup
-│   └── README_*.md              # Dify multi-language guides
-│
-├── ssc-broker/                  # Custom FastAPI broker for model bridging
-│   ├── broker.py                # Core logic: /v1/models & /v1/chat/completions
-│   ├── requirements.txt         # Python dependencies
-│   ├── docker-compose.yml       # Container orchestration
-│   └── Dockerfile               # Broker container build file
-│
-└── test_dir/                    # Experimental or validation scripts
+python -m venv .venv && source .venv/bin/activate
+pip install -r ssc-broker/requirements.txt -r benchmark/requirements.txt
+
+uvicorn mock_upstream:app --app-dir benchmark --port 8000 --log-level warning &
+UPSTREAM_LLM_BASE=http://127.0.0.1:8000/v1 BROKER_MAX_INFLIGHT=4 \
+    uvicorn broker:app --app-dir ssc-broker --port 8080 --log-level warning &
+sleep 3
+
+python benchmark/bench.py --base-url http://localhost:8080/v1 --concurrency 1,4,8 --max-tokens 60
+curl localhost:8000/stats      # peak_inflight stays at 4
+kill %1 %2
 ```
 
-#### Repository Structure on Local PC (Files downloaded form ssc-FinLLM github website) 
-```bash
-~/models/ssc-finllm-model/
-│
-├── config.json                       # Model configuration (hidden_size, layers, etc.)
-├── generation_config.json             # Sampling, temperature, top_p, max_length
-├── modeling_internlm2.py              # InternLM-based model architecture
-├── configuration_internlm.py          # Config class registration
-│
-├── pytorch_model-00001-of-00008.bin   # Model weights (split shards)
-├── pytorch_model-00002-of-00008.bin
-├── pytorch_model-00003-of-00008.bin
-├── pytorch_model-00004-of-00008.bin
-├── pytorch_model-00005-of-00008.bin
-├── pytorch_model-00006-of-00008.bin
-├── pytorch_model-00007-of-00008.bin
-├── pytorch_model-00008-of-00008.bin
-├── pytorch_model.bin.index.json       # Index mapping across shards
-│
-├── tokenizer.model                    # SentencePiece tokenizer
-├── tokenizer_config.json              # Tokenizer settings
-├── tokenization_internlm.py           # Tokenizer logic
-├── special_tokens_map.json            # Special token mapping (<bos>, <eos>, etc.)
-│
-└── README.md                          # Model training or usage notes
+The output is streamed in Traditional Chinese, converted by the broker from the mock's Simplified text. For production deployment and configuration, see [`ssc-broker/README.md`](ssc-broker/README.md). For GPU benchmarking, see [`benchmark/README.md`](benchmark/README.md).
+
+## Limitations & next steps
+
+- **Tests:** the broker is verified with the scripts in `benchmark/`, which have not yet been turned into pytest regression tests with CI.
+- **GPU benchmark:** re-measure single-stream speed and a concurrency sweep on a 24 GB GPU with `bench.py`.
+- **Retries:** failed upstream calls are not retried. A retry is only safe before streaming starts.
+- **Rate limiting** is in-memory per process. Running more than one broker instance would need Redis.
+- **Reproducibility:** the Dify deployment config and the exact vLLM launch command weren't committed. A suggested vLLM command is in `benchmark/README.md`.
+
+## Repository structure
+
+```
+ssc-broker/          FastAPI broker (my code): broker.py, Dockerfile, docker-compose.yml
+benchmark/           bench.py load tester + mock_upstream.py fake vLLM
+models/ssc-finllm-model/   model config & tokenizer files (weights not committed)
+doc_image/           demo screenshot & video
 ```
 
+## Tech stack
 
----
+Python · FastAPI · httpx · asyncio · SSE · OpenCC · Docker · AWS EC2 (Ubuntu 22.04) · Tailscale · vLLM · Dify
 
-### 📄 License & References  
-- [ssc-FinLLM (7B) – Fine-tuned Chinese financial model](https://github.com/haidizym/ssc-FinLLM?tab=readme-ov-file)  
-- [Dify Documentation](https://docs.dify.ai/)  
-- [FastAPI](https://fastapi.tiangolo.com/)  
-- [vLLM GitHub](https://github.com/vllm-project/vllm)  
-- [Ollama](https://ollama.ai/)  
+## References
 
----
-
-### ✨ Summary  
-> A fully deployed financial education LLM system integrating Dify, FastAPI Broker, and local vLLM inference — enabling low-latency, real-time financial education in Traditional Chinese.
+- [Dify v1.8.1](https://github.com/langgenius/dify/tree/1.8.1) · [docs](https://docs.dify.ai/)
+- [vLLM](https://github.com/vllm-project/vllm)
+- [ssc-FinLLM](https://github.com/haidizym/ssc-FinLLM)
+- [FastAPI](https://fastapi.tiangolo.com/) · [OpenCC](https://github.com/BYVoid/OpenCC) · [Tailscale](https://tailscale.com/)

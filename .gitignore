@@ -1,7 +1,6 @@
 # Ignore model folder
 *.bin
 *.model
-dify/docker
 
 # Python
 __pycache__/
@@ -9,3 +8,4 @@ __pycache__/
 
 # Local env
 .env
+.venv/
