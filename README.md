@@ -118,7 +118,7 @@ Numbers from the deployment's Dify database and broker log, recovered before the
 | Generation speed per answer | median 61.2 tok/s (59 answers) |
 | Peak concurrent generations | 2 |
 
-Generation speed is answer tokens ÷ LLM latency. The token counts are Dify's own estimate, not the model's tokenizer, so the speed is approximate. The median matches what I saw during development, and a 7B FP16 model on an RTX 3090 is memory-bandwidth-bound at roughly that speed. Real traffic never exceeded 2 concurrent generations, so the concurrency behaviour is covered by the broker benchmarks and tests below rather than by production load.
+Generation speed is answer tokens ÷ LLM latency. The token counts are Dify's own estimate, not the model's tokenizer, so the speed is approximate. The median matches what I saw during development, and a 7B FP16 model on an RTX 3090 is memory-bandwidth-bound at roughly that speed: every generated token reads all 15.48 GB of weights, and 936 GB/s ÷ 15.48 GB ≈ 60 tok/s. Real traffic never exceeded 2 concurrent generations, so the concurrency behaviour is covered by the broker benchmarks and tests below rather than by production load.
 
 ## Performance
 
@@ -134,6 +134,39 @@ Generation speed is answer tokens ÷ LLM latency. The token counts are Dify's ow
 The broker is not the bottleneck. System capacity is bounded by GPU throughput.
 
 **Model speed.** Median ~61 tok/s per answer in production on the RTX 3090 (see above). A controlled GPU sweep with `bench.py` is listed under next steps.
+
+### Capacity estimate (not measured)
+
+A back-of-envelope estimate of how many chat sessions one RTX 3090 can serve, from the model config and the production usage above.
+
+**1. How many generations fit in GPU memory at once?**
+
+All sizes in GiB (2³⁰ bytes); the RTX 3090's 24 GB is 24 GiB.
+
+| | | Source |
+|---|---|---|
+| VRAM vLLM may use | 21.6 GiB | 90% of 24 GiB, vLLM's default `gpu_memory_utilization` (the flags used in production weren't recorded) |
+| − model weights | 14.41 GiB | 15,475,417,088 bytes, `total_size` in [`pytorch_model.bin.index.json`](models/ssc-finllm-model/pytorch_model.bin.index.json) |
+| − runtime overhead (activations, CUDA graphs) | ~1–1.5 GiB | rule of thumb |
+| **= KV cache** | **~5.7–6.2 GiB** | |
+| KV cache per token | 128 KiB | 2 (K and V) × 32 layers × 8 KV heads × 128 dims × 2 bytes |
+| **= tokens that fit** | **~47–51 k** | |
+
+The per-token figure comes from [`config.json`](models/ssc-finllm-model/config.json): `num_hidden_layers` 32, `num_key_value_heads` 8 (grouped-query attention, so 8 K/V heads are shared by the 32 query heads), head size `hidden_size` 4096 ÷ `num_attention_heads` 32 = 128, and `torch_dtype` float16 = 2 bytes.
+
+A production request is ~1,000 tokens at the median (727 prompt incl. retrieved chunks + 280 answer) and ~2,300 at p90 (1,800 prompt + 512 max answer). So **~20–22 p90-sized generations** fit at once (~46–50 at the median).
+
+**2. How busy is one session?** Generating an answer takes ~5 s (280 tokens at ~61 tok/s), and users waited a median 24 s between turns. A session is generating ~5 / (5 + 24) ≈ 17% of the time.
+
+**3. Sessions supported.** 20 sessions → ~3.4 concurrent generations on average; 50 sessions → ~8.6 on average, peaks around 16. Even that peak stays under the ~20–22 limit from step 1, so **one RTX 3090 should serve roughly 20–50 active chat sessions.**
+
+The broker's default cap, `BROKER_MAX_INFLIGHT=16`, is consistent with this estimate: it sits a little below the ~20–22 p90-sized generations that fit in the KV cache, leaving headroom for longer prompts and the overhead guess. Requests beyond it wait in the broker's queue (and get a `503` after the timeout) instead of being admitted to vLLM, where they would compete for KV cache and could be preempted.
+
+**Caveats.**
+- Per-stream speed drops as vLLM batches more sequences, which lengthens each generation and raises the busy fraction. Only a GPU benchmark can pin this down.
+- Usage patterns come from two days of trial use; real users probably pause longer, which would make this estimate conservative.
+- Token counts are Dify's estimates, not the model's tokenizer.
+- These are *sessions*, not simultaneous generations: 50 sessions does **not** mean 50 requests generating at once.
 
 ## Quickstart (no GPU needed)
 
