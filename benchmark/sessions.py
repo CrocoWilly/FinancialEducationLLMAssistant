@@ -94,6 +94,9 @@ async def chat_turn(client, args, rng, inflight):
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    if args.min_tokens:
+        # vLLM extension: keep generating until min_tokens (worst-case long answers)
+        body["min_tokens"] = args.min_tokens
     res = {"status": None, "error": None, "ttft": None, "e2e": None, "tokens": 0,
            "prompt_tokens": None, "decode_tps": None}
     t0 = time.perf_counter()
@@ -229,6 +232,9 @@ async def main():
     ap.add_argument("--duration", type=float, default=180, help="seconds per level")
     ap.add_argument("--prompt-tokens", type=int, default=727)
     ap.add_argument("--max-tokens", type=int, default=512)
+    ap.add_argument("--min-tokens", type=int, default=0,
+                    help="force at least this many answer tokens (vLLM min_tokens); "
+                         "set to --max-tokens for a worst-case load")
     ap.add_argument("--think-median", type=float, default=24.0)
     ap.add_argument("--think-sigma", type=float, default=0.56,
                     help="log-normal sigma; 0.56 matches production p25=15 s / p75=32 s")
@@ -241,6 +247,7 @@ async def main():
 
     levels = [int(x) for x in args.sessions.split(",") if x.strip()]
     print(f"target={args.base_url} prompt~{args.prompt_tokens} tok, max_tokens={args.max_tokens}, "
+          f"{f'min_tokens={args.min_tokens}, ' if args.min_tokens else ''}"
           f"think median {args.think_median}s, {args.duration:.0f}s per level {args.label}")
     hdr = (f"{'sess':>4} {'reqs':>5} {'ok':>4} {'TTFT p50':>8} {'TTFT p95':>8} {'tok/s':>6} "
            f"{'e2e p50':>7} {'e2e p95':>7} {'infl avg/max':>12} {'vLLM run/wait':>13} "
@@ -251,6 +258,7 @@ async def main():
     for n in levels:
         row = await run_level(args, n)
         row["label"] = args.label
+        row["min_tokens"] = args.min_tokens
         rows.append(row)
         kv = row.get("vllm_kv_usage_max")
         run, wait = row.get("vllm_running_max"), row.get("vllm_waiting_max")

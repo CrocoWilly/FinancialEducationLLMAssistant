@@ -9,7 +9,10 @@
 # Optional env: HF_REPO, WORK (default /workspace), VLLM_VERSION (default: latest),
 #               SESSION_SECONDS (default 180), SKIP_INSTALL=1,
 #               BROKER_PORT (default 8090; 8080 is often taken by Jupyter on rented boxes),
-#               MOCK=1 (dry run without a GPU: mock vLLM instead of the real one).
+#               MOCK=1 (dry run without a GPU: mock vLLM instead of the real one),
+#               STAGES (default "single sweep sessions direct"; add "stress" for the
+#                       overload tests, e.g. SKIP_INSTALL=1 STAGES=stress on a box
+#                       that already ran the defaults).
 set -euo pipefail
 
 HF_REPO=${HF_REPO:-CrocoWilly/ssc-FinLLM-7B}
@@ -19,9 +22,12 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 MODEL_DIR=$WORK/ssc-finllm-model
 OUT=$WORK/results-$(date +%Y%m%d-%H%M)
 KEY=bench-key
+STAGES=${STAGES:-single sweep sessions direct}
+has() { [[ " $STAGES " == *" $1 "* ]]; }
 BROKER_PORT=${BROKER_PORT:-8090}
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/run.log") 2>&1
+ulimit -n 65536 2>/dev/null || true   # hundreds of concurrent connections
 
 step() { echo; echo "=== $(date +%T) $* ==="; }
 wait_http() {  # wait_http URL SECONDS
@@ -89,26 +95,55 @@ cd "$REPO/benchmark"
 METRICS=http://127.0.0.1:8000/metrics
 
 # ---------------------------------------------------------------- benchmarks
-step "1/5 warm-up"
+step "warm-up"
 python bench.py --base-url http://127.0.0.1:8000/v1 --concurrency 1 --rounds 2 --prompt-tokens 727 --max-tokens 64 >/dev/null
 
-step "2/5 single stream, direct to vLLM (production-sized prompt)"
+if has single; then
+step "single stream, direct to vLLM (production-sized prompt)"
 python bench.py --base-url http://127.0.0.1:8000/v1 --concurrency 1 --rounds 5 \
   --prompt-tokens 727 --max-tokens 512 --json-out "$OUT/single.json"
+fi
 
-step "3/5 concurrency sweep, direct to vLLM"
+if has sweep; then
+step "concurrency sweep, direct to vLLM"
 python bench.py --base-url http://127.0.0.1:8000/v1 --concurrency 1,2,4,8,16,32 --rounds 3 \
   --prompt-tokens 727 --max-tokens 512 --json-out "$OUT/sweep.json"
+fi
 
-step "4/5 chat sessions through the broker (cap 16)"
+if has sessions; then
+step "chat sessions through the broker (cap 16)"
 python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
   --sessions 10,20,50,80 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
   --label "via broker, cap 16" --json-out "$OUT/sessions_broker.json"
+fi
 
-step "5/5 chat sessions direct to vLLM (no cap)"
+if has direct; then
+step "chat sessions direct to vLLM (no cap)"
 python sessions.py --base-url http://127.0.0.1:8000/v1 \
   --sessions 50,80 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
   --label "direct to vLLM, no cap" --json-out "$OUT/sessions_direct.json"
+fi
+
+if has stress; then
+# Natural-length answers, more sessions: where does the system start to queue?
+step "stress: natural answers, through the broker"
+python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
+  --sessions 150,300 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "stress, via broker, cap 16" --json-out "$OUT/stress_natural_broker.json"
+step "stress: natural answers, direct to vLLM"
+python sessions.py --base-url http://127.0.0.1:8000/v1 \
+  --sessions 300 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "stress, direct to vLLM, no cap" --json-out "$OUT/stress_natural_direct.json"
+# Worst case: every answer runs to 512 tokens, so KV cache fills up.
+step "stress: 512-token answers, through the broker"
+python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
+  --sessions 50,100 --min-tokens 512 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "stress, 512-token answers, via broker, cap 16" --json-out "$OUT/stress_long_broker.json"
+step "stress: 512-token answers, direct to vLLM"
+python sessions.py --base-url http://127.0.0.1:8000/v1 \
+  --sessions 50,100 --min-tokens 512 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "stress, 512-token answers, direct to vLLM, no cap" --json-out "$OUT/stress_long_direct.json"
+fi
 
 # ---------------------------------------------------------------- pack
 step "pack results"
