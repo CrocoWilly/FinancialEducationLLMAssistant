@@ -9,10 +9,12 @@
 # Optional env: HF_REPO, WORK (default /workspace), VLLM_VERSION (default: latest),
 #               SESSION_SECONDS (default 180), SKIP_INSTALL=1,
 #               BROKER_PORT (default 8090; 8080 is often taken by Jupyter on rented boxes),
+#               BROKER_CAP (broker's in-flight cap, default 16),
 #               MOCK=1 (dry run without a GPU: mock vLLM instead of the real one),
 #               STAGES (default "single sweep sessions direct"; add "stress" for the
 #                       overload tests, e.g. SKIP_INSTALL=1 STAGES=stress on a box
-#                       that already ran the defaults).
+#                       that already ran the defaults; "cap" reruns only the
+#                       broker-side stress levels, e.g. BROKER_CAP=32 STAGES=cap).
 set -euo pipefail
 
 HF_REPO=${HF_REPO:-CrocoWilly/ssc-FinLLM-7B}
@@ -25,6 +27,7 @@ KEY=bench-key
 STAGES=${STAGES:-single sweep sessions direct}
 has() { [[ " $STAGES " == *" $1 "* ]]; }
 BROKER_PORT=${BROKER_PORT:-8090}
+BROKER_CAP=${BROKER_CAP:-16}            # broker's BROKER_MAX_INFLIGHT
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/run.log") 2>&1
 ulimit -n 65536 2>/dev/null || true   # hundreds of concurrent connections
@@ -83,9 +86,9 @@ VLLM_PID=$!
 if ! wait_http http://127.0.0.1:8000/health 1200; then tail -50 "$OUT/vllm.log"; exit 1; fi
 grep -i -E "KV cache|GPU blocks|maximum concurrency|Memory profiling" "$OUT/vllm.log" | tee "$OUT/vllm_kv_cache.txt" || true
 
-step "start broker (cap 16, API key)"
+step "start broker (cap $BROKER_CAP, API key)"
 ( cd "$REPO/ssc-broker" && UPSTREAM_LLM_BASE=http://127.0.0.1:8000/v1 BROKER_API_KEY=$KEY \
-    BROKER_MAX_INFLIGHT=16 QUEUE_WAIT_TIMEOUT=60 \
+    BROKER_MAX_INFLIGHT=$BROKER_CAP QUEUE_WAIT_TIMEOUT=60 \
     exec uvicorn broker:app --port $BROKER_PORT --log-level warning ) > "$OUT/broker.log" 2>&1 &
 BROKER_PID=$!
 trap 'kill $BROKER_PID $VLLM_PID 2>/dev/null || true' EXIT
@@ -111,10 +114,10 @@ python bench.py --base-url http://127.0.0.1:8000/v1 --concurrency 1,2,4,8,16,32 
 fi
 
 if has sessions; then
-step "chat sessions through the broker (cap 16)"
+step "chat sessions through the broker (cap $BROKER_CAP)"
 python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
   --sessions 10,20,50,80 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
-  --label "via broker, cap 16" --json-out "$OUT/sessions_broker.json"
+  --label "via broker, cap $BROKER_CAP" --json-out "$OUT/sessions_broker.json"
 fi
 
 if has direct; then
@@ -129,7 +132,7 @@ if has stress; then
 step "stress: natural answers, through the broker"
 python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
   --sessions 150,300 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
-  --label "stress, via broker, cap 16" --json-out "$OUT/stress_natural_broker.json"
+  --label "stress, via broker, cap $BROKER_CAP" --json-out "$OUT/stress_natural_broker.json"
 step "stress: natural answers, direct to vLLM"
 python sessions.py --base-url http://127.0.0.1:8000/v1 \
   --sessions 300 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
@@ -138,11 +141,23 @@ python sessions.py --base-url http://127.0.0.1:8000/v1 \
 step "stress: 512-token answers, through the broker"
 python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
   --sessions 50,100 --min-tokens 512 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
-  --label "stress, 512-token answers, via broker, cap 16" --json-out "$OUT/stress_long_broker.json"
+  --label "stress, 512-token answers, via broker, cap $BROKER_CAP" --json-out "$OUT/stress_long_broker.json"
 step "stress: 512-token answers, direct to vLLM"
 python sessions.py --base-url http://127.0.0.1:8000/v1 \
   --sessions 50,100 --min-tokens 512 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
   --label "stress, 512-token answers, direct to vLLM, no cap" --json-out "$OUT/stress_long_direct.json"
+fi
+
+if has cap; then
+# Same broker-side levels as "stress", to compare one cap against another.
+step "cap $BROKER_CAP: natural answers, through the broker"
+python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
+  --sessions 80,150,300 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "via broker, cap $BROKER_CAP" --json-out "$OUT/cap${BROKER_CAP}_natural_broker.json"
+step "cap $BROKER_CAP: 512-token answers, through the broker"
+python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
+  --sessions 50,100 --min-tokens 512 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "512-token answers, via broker, cap $BROKER_CAP" --json-out "$OUT/cap${BROKER_CAP}_long_broker.json"
 fi
 
 # ---------------------------------------------------------------- pack
