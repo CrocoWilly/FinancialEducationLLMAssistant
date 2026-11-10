@@ -1,0 +1,26 @@
+[
+  {
+    "sessions": 50,
+    "duration_s": 180.0,
+    "wall_s": 181.6,
+    "requests": 309,
+    "ok": 309,
+    "errors": {},
+    "ttft_p50": 0.21623277198523283,
+    "ttft_p95": 0.4355465315282345,
+    "e2e_p50": 2.4458173913881183,
+    "e2e_p95": 5.246865232102576,
+    "decode_tps_p50": 37.278649001256035,
+    "answer_tokens_p50": 79.0,
+    "prompt_tokens_p50": 745.0,
+    "agg_tps": 156.25934179888895,
+    "inflight_avg": 4.688705234159779,
+    "inflight_max": 12,
+    "vllm_running_max": 12.0,
+    "vllm_waiting_max": 0.0,
+    "vllm_kv_usage_max": 0.1779425393883225,
+    "vllm_preemptions": 0.0,
+    "label": "via broker, cap 32",
+    "min_tokens": 0
+  }
+]

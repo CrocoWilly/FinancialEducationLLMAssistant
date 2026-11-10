@@ -47,14 +47,22 @@ python -m vllm.entrypoints.openai.api_server \
   --trust-remote-code --dtype float16 --max-model-len 4096 --host 0.0.0.0 --port 8000
 ```
 
-and then runs, all with production-sized prompts (~727 tokens) and `max_tokens=512`:
+and then runs the stages listed in `STAGES`, all with ~727-token prompts (shuffled filler, so vLLM's
+prefix cache can't share them) and `max_tokens=512`. The broker runs with `BROKER_CAP` (default 32).
 
-| Step | What it measures |
-|---|---|
-| single stream, direct to vLLM | the generation speed one user sees |
-| concurrency sweep 1–32, direct to vLLM | aggregate throughput and per-user speed as batching grows |
-| 10 / 20 / 50 / 80 chat sessions through the broker (cap 16) | latency, errors, queueing, vLLM KV-cache usage — checks the 20–50 sessions estimate |
-| 50 / 80 chat sessions direct to vLLM (no cap) | what happens without the broker's cap (KV-cache pressure, preemptions) |
+| Stage | What it runs | What it measures |
+|---|---|---|
+| `single` | 1 stream, direct to vLLM | the generation speed one user sees |
+| `sweep` | 1–32 concurrent requests, direct to vLLM | aggregate throughput and per-user speed as batching grows |
+| `sessions` | 10 / 20 / 50 / 80 chat sessions through the broker | latency, errors, queueing, vLLM KV-cache usage |
+| `direct` | 50 / 80 chat sessions direct to vLLM (no cap) | the same without the broker's cap |
+| `stress` | 150 / 300 sessions, and 50 / 100 sessions with 512-token answers (`--min-tokens 512`), via the broker and direct | overload: queueing, `503`s, KV-cache pressure, preemptions |
+| `cap` | only the broker side of `stress` | compare one `BROKER_CAP` with another |
+
+Default: `STAGES="single sweep sessions direct"` (~30–40 min including install). On a box that already
+ran it: `SKIP_INSTALL=1 STAGES=stress`, or `SKIP_INSTALL=1 BROKER_CAP=16 STAGES=cap`. Results of the
+RTX 3090 run are in [`results/rtx3090-2026-11-10/`](results/rtx3090-2026-11-10/) and summarised in the
+[main README](../README.md#gpu-benchmark-rtx-3090).
 
 `MOCK=1 bash benchmark/gpu_run.sh` dry-runs the whole script without a GPU, using the mock instead of vLLM.
 

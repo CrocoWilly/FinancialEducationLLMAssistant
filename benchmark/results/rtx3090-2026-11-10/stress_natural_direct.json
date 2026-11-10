@@ -1,0 +1,26 @@
+[
+  {
+    "sessions": 300,
+    "duration_s": 180.0,
+    "wall_s": 217.5,
+    "requests": 872,
+    "ok": 872,
+    "errors": {},
+    "ttft_p50": 32.88788234582171,
+    "ttft_p95": 41.533002864615995,
+    "e2e_p50": 44.37326733022928,
+    "e2e_p95": 59.13322254666127,
+    "decode_tps_p50": 6.819379896395581,
+    "answer_tokens_p50": 89.0,
+    "prompt_tokens_p50": 869.0,
+    "agg_tps": 375.3440848685267,
+    "inflight_avg": 172.74022988505746,
+    "inflight_max": 250,
+    "vllm_running_max": 61.0,
+    "vllm_waiting_max": 189.0,
+    "vllm_kv_usage_max": 1.0,
+    "vllm_preemptions": 52.0,
+    "label": "stress, direct to vLLM, no cap",
+    "min_tokens": 0
+  }
+]

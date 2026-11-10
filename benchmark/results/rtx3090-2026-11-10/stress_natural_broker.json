@@ -1,0 +1,52 @@
+[
+  {
+    "sessions": 150,
+    "duration_s": 180.0,
+    "wall_s": 193.2,
+    "requests": 680,
+    "ok": 680,
+    "errors": {},
+    "ttft_p50": 10.05183551600203,
+    "ttft_p95": 17.445549899991594,
+    "e2e_p50": 14.293240494094789,
+    "e2e_p95": 22.77539291591382,
+    "decode_tps_p50": 21.45411943212032,
+    "answer_tokens_p50": 81.0,
+    "prompt_tokens_p50": 745.0,
+    "agg_tps": 316.1142509249333,
+    "inflight_avg": 51.72279792746114,
+    "inflight_max": 91,
+    "vllm_running_max": 16.0,
+    "vllm_waiting_max": 2.0,
+    "vllm_kv_usage_max": 0.25115848007414276,
+    "vllm_preemptions": 0.0,
+    "label": "stress, via broker, cap 16",
+    "min_tokens": 0
+  },
+  {
+    "sessions": 300,
+    "duration_s": 180.0,
+    "wall_s": 234.6,
+    "requests": 844,
+    "ok": 837,
+    "errors": {
+      "HTTP 503": 7
+    },
+    "ttft_p50": 50.23933910392225,
+    "ttft_p95": 55.4154906751588,
+    "e2e_p50": 53.66744392551482,
+    "e2e_p95": 60.23180060740561,
+    "decode_tps_p50": 21.400840735217084,
+    "answer_tokens_p50": 81.0,
+    "prompt_tokens_p50": 745.0,
+    "agg_tps": 317.4953715215849,
+    "inflight_avg": 169.5735607675906,
+    "inflight_max": 231,
+    "vllm_running_max": 16.0,
+    "vllm_waiting_max": 2.0,
+    "vllm_kv_usage_max": 0.25671918443002784,
+    "vllm_preemptions": 0.0,
+    "label": "stress, via broker, cap 16",
+    "min_tokens": 0
+  }
+]

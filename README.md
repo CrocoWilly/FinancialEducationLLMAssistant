@@ -10,7 +10,9 @@ A Traditional-Chinese financial Q&A assistant: a web/mobile chat UI on AWS, answ
 
 **Solo project.** I designed, deployed, and tested the whole pipeline. Dify (chat UI and orchestration), vLLM (inference) and the ssc-FinLLM model are off-the-shelf; **the FastAPI broker that connects them and the benchmark tooling are my code.**
 
-- **Cloud-to-home streaming pipeline.** Dify on AWS EC2 → my broker → Tailscale → vLLM on a local RTX 3090, with tokens streamed end to end over SSE (median ~61 tok/s per answer across 59 real answers).
+- **Cloud-to-home streaming pipeline.** Dify on AWS EC2 → my broker → Tailscale → vLLM on a local RTX 3090, with tokens streamed end to end over SSE.
+- **Tested on a real GPU.** I rented an RTX 3090, the GPU the app ran on, and simulated many users chatting at once. One GPU served **80 people at the same time with no errors**, and answers started appearing within about half a second. [Details ↓](#gpu-benchmark-rtx-3090)
+- **Tuned the broker's limit with data.** The broker limits how many requests reach the GPU at once. The test showed the original limit of 16 was too strict: users waited in line while the GPU had room to spare. Raising it to 32 made the slowest answers finish 26–40% sooner.
 - **Low-overhead broker.** At 50 concurrent streams it adds ≤ ~10 ms to time-to-first-token (p95), with 0 errors and no per-stream slowdown, while converting every chunk from Simplified to Traditional Chinese.
 - **Found and fixed a concurrency bug by load testing.** The original semaphore logic let streams bypass the cap entirely and leaked slots on idle, dropping throughput from ~197 to 66 tok/s. I reproduced it with a mock upstream, fixed it, and verified the fix with the same test. [Details ↓](#case-study-a-concurrency-cap-that-didnt-cap)
 
@@ -56,6 +58,11 @@ ssc-FinLLM is a Simplified-Chinese model, but the users read Traditional Chinese
 
 **Why cap concurrency in the broker when vLLM already batches requests?**
 vLLM accepts every request and queues internally. On a single 24 GB consumer GPU, too many concurrent sequences compete for KV-cache memory and every user slows down. A semaphore in the broker (`BROKER_MAX_INFLIGHT`) bounds how much work reaches the GPU. Requests beyond the cap wait in a queue with a timeout and then get a fast `503` with `Retry-After`, instead of hanging.
+
+The limit is 32. I chose it by testing three settings on the GPU ([details](#what-should-the-brokers-limit-be)):
+- **16 was too strict.** Requests waited in line while the GPU still had free memory.
+- **No limit was too loose.** Under heavy load the GPU ran out of memory, and vLLM had to pause answers and redo them, which slowed everyone down.
+- **32 was the fastest of the three.**
 
 **Why Tailscale between EC2 and the home PC?**
 The GPU machine needs no public port or router configuration. Traffic goes through an encrypted WireGuard tunnel, and EC2 reaches the PC at a stable private address. Running the GPU at home avoids paying for a cloud GPU around the clock.
@@ -108,19 +115,19 @@ finally:
 
 ## In production (September 2025)
 
-Numbers from the deployment's Dify database and broker log, recovered before the server was shut down:
+The app ran for two days in September 2025. These numbers come from Dify's database and the broker's log, saved before the server was shut down.
 
-| Metric | Value |
+| | |
 |---|---|
-| Test accounts / users who asked questions | 10 / 8 |
-| Conversations / answers | 20 / 61, over 2 days (2025-09-26 and 27) |
-| Most users active at the same time | 2 within any 5 min, 3 within any 15 min |
-| Broker chat requests | 75, all `200` |
-| Answer latency (LLM call) | median 4.98 s, p90 7.08 s |
-| Generation speed per answer | median 61.2 tok/s (59 answers) |
-| Peak concurrent generations | 2 |
+| People who asked questions | 8 (10 test accounts) |
+| Conversations / answers | 20 / 61 |
+| Most people using it at the same time | 2–3 |
+| Requests through the broker | 75, all successful |
+| Time to get a full answer | about 5 s (median) |
 
-Generation speed is answer tokens ÷ LLM latency. The token counts are Dify's own estimate, not the model's tokenizer, so the speed is approximate. The median matches what I saw during development, and a 7B FP16 model on an RTX 3090 is memory-bandwidth-bound at roughly that speed: every generated token reads all 15.48 GB of weights, and 936 GB/s ÷ 15.48 GB ≈ 60 tok/s. Real traffic never exceeded 2 concurrent generations, so the concurrency behaviour is covered by the broker benchmarks and tests below rather than by production load.
+How these people used the app also shaped the GPU test below: they waited about 24 seconds between questions, and a typical answer was short (about 75 tokens).
+
+**Dify counts tokens about twice too high.** I first reported ~61 tokens/s from Dify's logs. When I recounted with the model's own tokenizer, Dify's numbers turned out about 2× too high (a typical prompt: 727 by Dify's count, 377 actually). The speed measured on a real GPU is 52.9 tokens/s.
 
 ## Performance
 
@@ -135,40 +142,110 @@ Generation speed is answer tokens ÷ LLM latency. The token counts are Dify's ow
 
 The broker is not the bottleneck. System capacity is bounded by GPU throughput.
 
-**Model speed.** Median ~61 tok/s per answer in production on the RTX 3090 (see above). A controlled GPU sweep with `bench.py` is listed under next steps.
+### GPU benchmark (RTX 3090)
 
-### Capacity estimate (not measured)
+**In short:**
+- **One RTX 3090 comfortably serves 80 people chatting at the same time.**
+- **One person sees about 53 tokens/s.**
+- **Letting the broker send up to 32 requests to the GPU at once works best.** The old limit of 16 was too strict, and no limit was worse too.
 
-A back-of-envelope estimate of how many chat sessions one RTX 3090 can serve, from the model config and the production usage above.
+#### How I tested
 
-**1. How many generations fit in GPU memory at once?**
+I rented an RTX 3090, the same GPU the app used, and ran the model with the same settings as in production, with the broker in front.
 
-All sizes in GiB (2³⁰ bytes); the RTX 3090's 24 GB is 24 GiB.
+A script ([`sessions.py`](benchmark/sessions.py)) plays many users at once. Each pretend user:
+1. asks a question,
+2. waits for the full answer,
+3. pauses for about 24 seconds, like the real users did,
+4. and asks again.
+
+Each test runs for 3 minutes, with 10 to 300 users. To be safe, the test prompts are about twice as long as real ones, so real traffic should do a little better than the numbers here.
+
+One script, [`gpu_run.sh`](benchmark/gpu_run.sh), runs the whole test. The raw results are in [`benchmark/results/`](benchmark/results/rtx3090-2026-11-10/).
+
+**Terms used below**
+- **Answer starts:** time until the first words appear.
+- **Answer done:** time until the whole answer has arrived.
+- **p95:** 95% of requests were at least this fast. It shows what the slower users experienced.
+
+#### How many users can one GPU serve?
+
+With the broker's limit at 32:
+
+| Users chatting at once | Answer starts (p95) | Answer done (p95) | Errors |
+|---|---|---|---|
+| 50 | 0.4 s | 5.3 s | 0 |
+| **80** | **0.5 s** | **7.0 s** | **0** |
+| 150 | 7.9 s | 16.9 s | 0 |
+| 300 | 39.7 s | 48.4 s | 0 |
+
+Up to 80 users, answers start almost immediately. At 150, users wait several seconds before the answer starts. At 300, the GPU is overloaded.
+
+#### What should the broker's limit be?
+
+The broker limits how many requests it sends to the GPU at once. Extra requests wait in the broker until a slot frees up. I compared a limit of 16, a limit of 32, and no limit.
+
+Too many requests at once is also a problem. The GPU keeps each answer in progress in its memory (the KV cache). When that memory runs out, vLLM has to pause some answers and redo them later, which slows everyone down.
+
+Answer done (p95):
+
+| Situation | Limit 16 | **Limit 32** | No limit |
+|---|---|---|---|
+| 150 users, normal answers | 22.8 s | **16.9 s** | 23.7 s, 20 answers paused and redone |
+| 100 users, every answer 512 tokens long | 69.8 s, 5 requests rejected | **42.2 s** | 49.8 s, 101 answers paused and redone |
+
+- **Limit 16 is too strict.** Requests waited in line while the GPU still had plenty of free memory: it never used more than 37%.
+- **No limit is too loose.** The GPU's memory filled up, and answers had to be paused and redone.
+- **Limit 32 works best.** Memory use peaked at 73%, nothing had to be redone, and the slowest answers finished sooner than with either other setting.
+
+So I changed the broker's default limit from 16 to 32.
+
+#### Speed when many requests run at once
+
+Sending requests straight to vLLM, without the broker:
+
+| Requests at once | 1 | 4 | 16 | 32 |
+|---|---|---|---|---|
+| Speed each user sees (tokens/s) | 53 | 41 | 22 | 13 |
+| Total speed of the GPU (tokens/s) | 46 | 127 | 272 | 332 |
+
+The more requests share the GPU, the slower each one is, but the GPU produces more in total.
+
+One user's 53 tokens/s is the most this card can deliver. To produce each token, the GPU has to read the whole model (15.5 GB) from memory, and this card reads about 805 GB per second (805 ÷ 15.5 ≈ 52).
+
+#### Other findings
+
+- **The GPU spends most of its time reading prompts, not writing answers.** Each request sends a long prompt (instructions plus course notes) and gets a short answer back. vLLM can reuse work when prompts start with the same text. Right now the course notes come first and the fixed instructions last, so there is little to reuse. Moving the instructions to the front would help.
+- **Converting to Simplified Chinese also saves work.** The broker converts questions to Simplified Chinese for the model. For this model, the same prompt is 14% shorter in Simplified.
+- **I caught a mistake in my first test.** My first version sent nearly identical prompts every time. vLLM reused most of the work, and the results looked 2–3× better than reality. I noticed it in vLLM's logs, fixed the test, and reran everything. Only the fixed results are shown here.
+
+#### Limits of this test
+
+- The course notes in the test prompts are stand-in text of the same length, not the real notes.
+- Each setting was run once. The differences between settings are much larger than the variation between runs.
+- The production machine's vLLM version wasn't recorded. The test used vLLM 0.33.0.
+
+### GPU memory: estimate vs measured
+
+Before renting the GPU, I calculated from the model's config how much memory would be left for answers in progress (the KV cache): room for about 47–51k tokens. On the real card, vLLM reported 48.6–51.8k ([log](benchmark/results/rtx3090-2026-11-10/vllm_kv_cache.txt)), matching the estimate.
+
+<details>
+<summary>How the estimate works</summary>
+
+All sizes in GiB (2³⁰ bytes).
 
 | | | Source |
 |---|---|---|
-| VRAM vLLM may use | 21.6 GiB | 90% of 24 GiB, vLLM's default `gpu_memory_utilization` (production didn't override it) |
+| Memory vLLM may use | 21.6 GiB | 90% of 24 GiB, vLLM's default (vLLM 0.33 uses 92% of the 23.56 GiB the driver reports: 21.68 GiB) |
 | − model weights | 14.41 GiB | 15,475,417,088 bytes, `total_size` in [`pytorch_model.bin.index.json`](models/ssc-finllm-model/pytorch_model.bin.index.json) |
-| − runtime overhead (activations, CUDA graphs) | ~1–1.5 GiB | rule of thumb |
-| **= KV cache** | **~5.7–6.2 GiB** | |
-| KV cache per token | 128 KiB | 2 (K and V) × 32 layers × 8 KV heads × 128 dims × 2 bytes |
+| − other runtime memory | ~1–1.5 GiB | rule of thumb |
+| **= memory for answers in progress** | **~5.7–6.2 GiB** | |
+| Memory per token | 128 KiB | 2 (K and V) × 32 layers × 8 KV heads × 128 dims × 2 bytes |
 | **= tokens that fit** | **~47–51 k** | |
 
 The per-token figure comes from [`config.json`](models/ssc-finllm-model/config.json): `num_hidden_layers` 32, `num_key_value_heads` 8 (grouped-query attention, so 8 K/V heads are shared by the 32 query heads), head size `hidden_size` 4096 ÷ `num_attention_heads` 32 = 128, and `torch_dtype` float16 = 2 bytes.
 
-A production request is ~1,000 tokens at the median (727 prompt incl. retrieved chunks + 280 answer) and ~2,300 at p90 (1,800 prompt + 512 max answer). So **~20–22 p90-sized generations** fit at once (~46–50 at the median).
-
-**2. How busy is one session?** Generating an answer takes ~5 s (280 tokens at ~61 tok/s), and users waited a median 24 s between turns. A session is generating ~5 / (5 + 24) ≈ 17% of the time.
-
-**3. Sessions supported.** 20 sessions → ~3.4 concurrent generations on average; 50 sessions → ~8.6 on average, peaks around 16. Even that peak stays under the ~20–22 limit from step 1, so **one RTX 3090 should serve roughly 20–50 active chat sessions.**
-
-The broker's default cap, `BROKER_MAX_INFLIGHT=16`, is consistent with this estimate: it sits a little below the ~20–22 p90-sized generations that fit in the KV cache, leaving headroom for longer prompts and the overhead guess. Requests beyond it wait in the broker's queue (and get a `503` after the timeout) instead of being admitted to vLLM, where they would compete for KV cache and could be preempted.
-
-**Caveats.**
-- Per-stream speed drops as vLLM batches more sequences, which lengthens each generation and raises the busy fraction. Only a GPU benchmark can pin this down.
-- Usage patterns come from two days of trial use; real users probably pause longer, which would make this estimate conservative.
-- Token counts are Dify's estimates, not the model's tokenizer.
-- These are *sessions*, not simultaneous generations: 50 sessions does **not** mean 50 requests generating at once.
+</details>
 
 ## Quickstart (no GPU needed)
 
@@ -213,17 +290,19 @@ To check that the tests actually catch bugs, I ran them against the original `br
 
 ## Limitations & next steps
 
-- **GPU benchmark:** the production speed comes from Dify's approximate token counts; a controlled single-stream and concurrency sweep on a 24 GB GPU with `bench.py` would replace it. The original GPU machine is retired, so this needs a rented GPU.
+- **The broker's limit counts requests, not their size.** 32 suits this GPU and these prompts. A different GPU or much longer prompts would need a new value. A smarter limit would count tokens against the GPU's free memory instead.
+- **The prompt order makes it hard for vLLM to reuse work.** The fixed instructions come after the course notes. Moving them to the front would let vLLM reuse them for every request.
 - **Retries:** failed upstream calls are not retried. A retry is only safe before streaming starts.
 - **Rate limiting:** the broker only sees Dify's IP, so its per-IP limit would throttle all users together; it is off by default. Per-user limits should be set in Nginx (which sees client IPs; its config lives in the Dify deployment on EC2, not in this repo) or in Dify. The limiter's per-IP table is also in-memory and never pruned.
 - **Multiple workers / instances:** the concurrency cap and rate limit are per process, so N uvicorn workers allow N × `BROKER_MAX_INFLIGHT`. A shared cap would need Redis or similar.
-- **Reproducibility:** Dify ran as the stock 1.8.1 Docker deployment with two changes: `OPENAI_API_BASE=http://broker:8080` in `.env`, and `extra_hosts: host.docker.internal:host-gateway` on the `api`, `worker` and `worker_beat` services. vLLM ran with `--dtype float16 --max-model-len 4096 --trust-remote-code` and default memory settings; the full command is in [`benchmark/README.md`](benchmark/README.md).
+- **Reproducibility:** Dify ran as the stock 1.8.1 Docker deployment with two changes: `OPENAI_API_BASE=http://broker:8080` in `.env`, and `extra_hosts: host.docker.internal:host-gateway` on the `api`, `worker` and `worker_beat` services. vLLM ran with `--dtype float16 --max-model-len 4096 --trust-remote-code` and default memory settings; the full command is in [`benchmark/README.md`](benchmark/README.md), and the benchmark's versions are in [`env.txt`](benchmark/results/rtx3090-2026-11-10/env.txt).
 
 ## Repository structure
 
 ```
 ssc-broker/          FastAPI broker (my code): broker.py, Dockerfile, docker-compose.yml
-benchmark/           bench.py load tester + mock_upstream.py fake vLLM
+benchmark/           bench.py load tester, sessions.py chat-user simulator, mock_upstream.py fake vLLM,
+                     gpu_run.sh one-shot GPU benchmark, results/ raw output of the RTX 3090 run
 tests/               pytest suite for the broker (runs in CI)
 .github/workflows/   GitHub Actions: run pytest on every push / PR
 models/ssc-finllm-model/   model config & tokenizer files (weights not committed)
