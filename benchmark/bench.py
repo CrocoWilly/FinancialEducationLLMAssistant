@@ -27,6 +27,8 @@ import time
 
 import httpx
 
+from prompts import build_messages
+
 DEFAULT_PROMPT = "請用淺顯的方式解釋什麼是股票、債券和基金，以及它們的風險差異。"
 
 
@@ -42,7 +44,8 @@ def pct(xs, p):
 async def one_request(client, args):
     body = {
         "model": args.model,
-        "messages": [{"role": "user", "content": args.prompt}],
+        "messages": (build_messages(args.prompt_tokens) if args.prompt_tokens
+                     else [{"role": "user", "content": args.prompt}]),
         "max_tokens": args.max_tokens,
         "temperature": 0.7,
         "stream": not args.no_stream,
@@ -164,6 +167,9 @@ async def main():
     ap.add_argument("--model", default="ssc-FinLLM")
     ap.add_argument("--api-key", default="")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)
+    ap.add_argument("--prompt-tokens", type=int, default=0,
+                    help="use a production-shaped prompt of ~N tokens (system prompt + "
+                         "context + question) instead of --prompt; production median is 727")
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--concurrency", default="1,4,8,16",
                     help="comma-separated levels, e.g. 1,4,8,16,32")
@@ -180,7 +186,8 @@ async def main():
     rows = []
     hdr = (f"{'conc':>4} {'reqs':>5} {'ok':>4} {'TTFT p50':>9} {'TTFT p95':>9} "
            f"{'decode tok/s':>12} {'e2e p50':>8} {'e2e p95':>8} {'agg tok/s':>10}  errors")
-    print(f"target={args.base_url}  stream={not args.no_stream}  max_tokens={args.max_tokens}")
+    print(f"target={args.base_url}  stream={not args.no_stream}  max_tokens={args.max_tokens}"
+          f"  prompt={'~%d tokens' % args.prompt_tokens if args.prompt_tokens else 'short'}")
     print(hdr)
     print("-" * len(hdr))
     for conc in levels:

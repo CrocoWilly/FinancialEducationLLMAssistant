@@ -147,7 +147,7 @@ All sizes in GiB (2³⁰ bytes); the RTX 3090's 24 GB is 24 GiB.
 
 | | | Source |
 |---|---|---|
-| VRAM vLLM may use | 21.6 GiB | 90% of 24 GiB, vLLM's default `gpu_memory_utilization` (the flags used in production weren't recorded) |
+| VRAM vLLM may use | 21.6 GiB | 90% of 24 GiB, vLLM's default `gpu_memory_utilization` (production didn't override it) |
 | − model weights | 14.41 GiB | 15,475,417,088 bytes, `total_size` in [`pytorch_model.bin.index.json`](models/ssc-finllm-model/pytorch_model.bin.index.json) |
 | − runtime overhead (activations, CUDA graphs) | ~1–1.5 GiB | rule of thumb |
 | **= KV cache** | **~5.7–6.2 GiB** | |
@@ -217,7 +217,7 @@ To check that the tests actually catch bugs, I ran them against the original `br
 - **Retries:** failed upstream calls are not retried. A retry is only safe before streaming starts.
 - **Rate limiting:** the broker only sees Dify's IP, so its per-IP limit would throttle all users together; it is off by default. Per-user limits should be set in Nginx (which sees client IPs; its config lives in the Dify deployment on EC2, not in this repo) or in Dify. The limiter's per-IP table is also in-memory and never pruned.
 - **Multiple workers / instances:** the concurrency cap and rate limit are per process, so N uvicorn workers allow N × `BROKER_MAX_INFLIGHT`. A shared cap would need Redis or similar.
-- **Reproducibility:** Dify ran as the stock 1.8.1 Docker deployment with two changes: `OPENAI_API_BASE=http://broker:8080` in `.env`, and `extra_hosts: host.docker.internal:host-gateway` on the `api`, `worker` and `worker_beat` services. The exact vLLM launch command wasn't recorded; a suggested one is in `benchmark/README.md`.
+- **Reproducibility:** Dify ran as the stock 1.8.1 Docker deployment with two changes: `OPENAI_API_BASE=http://broker:8080` in `.env`, and `extra_hosts: host.docker.internal:host-gateway` on the `api`, `worker` and `worker_beat` services. vLLM ran with `--dtype float16 --max-model-len 4096 --trust-remote-code` and default memory settings; the full command is in [`benchmark/README.md`](benchmark/README.md).
 
 ## Repository structure
 

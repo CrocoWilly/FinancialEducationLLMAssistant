@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# One-shot GPU benchmark: download the model, start vLLM with the production
+# flags, start the broker in front of it, run every benchmark, pack the results.
+#
+# On a fresh GPU box (24 GB card, e.g. RTX 3090), from a clone of this repo:
+#     export HF_TOKEN=hf_...            # read access to the model repo
+#     bash benchmark/gpu_run.sh
+#
+# Optional env: HF_REPO, WORK (default /workspace), VLLM_VERSION (default: latest),
+#               SESSION_SECONDS (default 180), SKIP_INSTALL=1,
+#               MOCK=1 (dry run without a GPU: mock vLLM instead of the real one).
+set -euo pipefail
+
+HF_REPO=${HF_REPO:-CrocoWilly/ssc-FinLLM-7B}
+WORK=${WORK:-/workspace}
+SESSION_SECONDS=${SESSION_SECONDS:-180}
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+MODEL_DIR=$WORK/ssc-finllm-model
+OUT=$WORK/results-$(date +%Y%m%d-%H%M)
+KEY=bench-key
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/run.log") 2>&1
+
+step() { echo; echo "=== $(date +%T) $* ==="; }
+wait_http() {  # wait_http URL SECONDS
+  for _ in $(seq "$2"); do curl -sf "$1" >/dev/null && return 0; sleep 1; done
+  echo "timed out waiting for $1"; return 1
+}
+
+# ---------------------------------------------------------------- setup
+if [ "${SKIP_INSTALL:-0}" != 1 ] && [ "${MOCK:-0}" != 1 ]; then
+  step "install vLLM ${VLLM_VERSION:-latest}, broker and benchmark deps"
+  pip install -q -U pip
+  pip install -q "vllm${VLLM_VERSION:+==$VLLM_VERSION}" huggingface_hub \
+      -r "$REPO/ssc-broker/requirements.txt" -r "$REPO/benchmark/requirements.txt"
+fi
+
+if [ "${MOCK:-0}" != 1 ]; then
+  step "download $HF_REPO"
+  hf download "$HF_REPO" --local-dir "$MODEL_DIR"
+  ls -la "$MODEL_DIR"
+
+  step "environment"
+  {
+    nvidia-smi
+    python --version
+    python -c "import vllm, torch, transformers; print('vllm', vllm.__version__, '| torch', torch.__version__, '| transformers', transformers.__version__)"
+    git -C "$REPO" rev-parse --short HEAD
+  } | tee "$OUT/env.txt"
+fi
+
+# ---------------------------------------------------------------- servers
+step "start vLLM with the production flags"
+if [ "${MOCK:-0}" = 1 ]; then
+  ( cd "$REPO/benchmark" && exec python -m uvicorn mock_upstream:app --port 8000 --log-level warning ) > "$OUT/vllm.log" 2>&1 &
+else
+# Same command the production GPU machine used (gpu_memory_utilization left at its default).
+python -m vllm.entrypoints.openai.api_server \
+  --model "$MODEL_DIR" \
+  --tokenizer "$MODEL_DIR" \
+  --served-model-name ssc-FinLLM \
+  --trust-remote-code \
+  --dtype float16 \
+  --max-model-len 4096 \
+  --host 0.0.0.0 \
+  --port 8000 > "$OUT/vllm.log" 2>&1 &
+fi
+VLLM_PID=$!
+if ! wait_http http://127.0.0.1:8000/health 1200; then tail -50 "$OUT/vllm.log"; exit 1; fi
+grep -i -E "KV cache|GPU blocks|maximum concurrency|Memory profiling" "$OUT/vllm.log" | tee "$OUT/vllm_kv_cache.txt" || true
+
+step "start broker (cap 16, API key)"
+( cd "$REPO/ssc-broker" && UPSTREAM_LLM_BASE=http://127.0.0.1:8000/v1 BROKER_API_KEY=$KEY \
+    BROKER_MAX_INFLIGHT=16 QUEUE_WAIT_TIMEOUT=60 \
+    exec uvicorn broker:app --port 8080 --log-level warning ) > "$OUT/broker.log" 2>&1 &
+BROKER_PID=$!
+trap 'kill $BROKER_PID $VLLM_PID 2>/dev/null || true' EXIT
+wait_http http://127.0.0.1:8080/health 30
+
+cd "$REPO/benchmark"
+METRICS=http://127.0.0.1:8000/metrics
+
+# ---------------------------------------------------------------- benchmarks
+step "1/5 warm-up"
+python bench.py --base-url http://127.0.0.1:8000/v1 --concurrency 1 --rounds 2 --prompt-tokens 727 --max-tokens 64 >/dev/null
+
+step "2/5 single stream, direct to vLLM (production-sized prompt)"
+python bench.py --base-url http://127.0.0.1:8000/v1 --concurrency 1 --rounds 5 \
+  --prompt-tokens 727 --max-tokens 512 --json-out "$OUT/single.json"
+
+step "3/5 concurrency sweep, direct to vLLM"
+python bench.py --base-url http://127.0.0.1:8000/v1 --concurrency 1,2,4,8,16,32 --rounds 3 \
+  --prompt-tokens 727 --max-tokens 512 --json-out "$OUT/sweep.json"
+
+step "4/5 chat sessions through the broker (cap 16)"
+python sessions.py --base-url http://127.0.0.1:8080/v1 --api-key $KEY \
+  --sessions 10,20,50,80 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "via broker, cap 16" --json-out "$OUT/sessions_broker.json"
+
+step "5/5 chat sessions direct to vLLM (no cap)"
+python sessions.py --base-url http://127.0.0.1:8000/v1 \
+  --sessions 50,80 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "direct to vLLM, no cap" --json-out "$OUT/sessions_direct.json"
+
+# ---------------------------------------------------------------- pack
+step "pack results"
+tar czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
+echo "results: $OUT.tar.gz"

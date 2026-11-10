@@ -67,6 +67,24 @@ async def get_stats():
     return stats
 
 
+@app.get("/health")
+async def health():
+    """Liveness endpoint, like vLLM's (scripts wait on it before benchmarking)."""
+    return {}
+
+
+@app.get("/metrics")
+async def metrics():
+    """A few gauges in vLLM's Prometheus format, so metric scraping can be tested without a GPU."""
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        f'vllm:num_requests_running{{model_name="{MODEL}"}} {stats["inflight"]}\n'
+        f'vllm:num_requests_waiting{{model_name="{MODEL}"}} 0\n'
+        f'vllm:kv_cache_usage_perc{{model_name="{MODEL}"}} {min(stats["inflight"] / 20, 1.0)}\n'
+        f'vllm:num_preemptions_total{{model_name="{MODEL}"}} 0\n'
+    )
+
+
 @app.post("/stats/reset")
 async def reset_stats():
     stats.update(inflight=stats["inflight"], peak_inflight=stats["inflight"],
