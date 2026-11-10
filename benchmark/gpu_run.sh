@@ -14,7 +14,9 @@
 #               STAGES (default "single sweep sessions direct"; add "stress" for the
 #                       overload tests, e.g. SKIP_INSTALL=1 STAGES=stress on a box
 #                       that already ran the defaults; "cap" reruns only the
-#                       broker-side stress levels, e.g. BROKER_CAP=32 STAGES=cap).
+#                       broker-side stress levels, e.g. BROKER_CAP=32 STAGES=cap;
+#                       "fill" runs 150 sessions with no cap and 50 through the
+#                       broker, the two cells the other stages leave out).
 set -euo pipefail
 
 HF_REPO=${HF_REPO:-CrocoWilly/ssc-FinLLM-7B}
@@ -158,6 +160,17 @@ step "cap $BROKER_CAP: 512-token answers, through the broker"
 python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
   --sessions 50,100 --min-tokens 512 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
   --label "512-token answers, via broker, cap $BROKER_CAP" --json-out "$OUT/cap${BROKER_CAP}_long_broker.json"
+fi
+
+if has fill; then
+step "fill: natural answers, 150 sessions direct to vLLM"
+python sessions.py --base-url http://127.0.0.1:8000/v1 \
+  --sessions 150 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "stress, direct to vLLM, no cap" --json-out "$OUT/fill_natural_direct_150.json"
+step "fill: natural answers, 50 sessions through the broker (cap $BROKER_CAP)"
+python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
+  --sessions 50 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
+  --label "via broker, cap $BROKER_CAP" --json-out "$OUT/fill_cap${BROKER_CAP}_natural_broker_50.json"
 fi
 
 # ---------------------------------------------------------------- pack
