@@ -8,6 +8,7 @@
 #
 # Optional env: HF_REPO, WORK (default /workspace), VLLM_VERSION (default: latest),
 #               SESSION_SECONDS (default 180), SKIP_INSTALL=1,
+#               BROKER_PORT (default 8090; 8080 is often taken by Jupyter on rented boxes),
 #               MOCK=1 (dry run without a GPU: mock vLLM instead of the real one).
 set -euo pipefail
 
@@ -18,6 +19,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 MODEL_DIR=$WORK/ssc-finllm-model
 OUT=$WORK/results-$(date +%Y%m%d-%H%M)
 KEY=bench-key
+BROKER_PORT=${BROKER_PORT:-8090}
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/run.log") 2>&1
 
@@ -50,6 +52,12 @@ if [ "${MOCK:-0}" != 1 ]; then
 fi
 
 # ---------------------------------------------------------------- servers
+for port in 8000 "$BROKER_PORT"; do
+  if curl -s -o /dev/null "http://127.0.0.1:$port/"; then
+    echo "port $port is already in use on this machine; free it or set BROKER_PORT"; exit 1
+  fi
+done
+
 step "start vLLM with the production flags"
 if [ "${MOCK:-0}" = 1 ]; then
   ( cd "$REPO/benchmark" && exec python -m uvicorn mock_upstream:app --port 8000 --log-level warning ) > "$OUT/vllm.log" 2>&1 &
@@ -72,10 +80,10 @@ grep -i -E "KV cache|GPU blocks|maximum concurrency|Memory profiling" "$OUT/vllm
 step "start broker (cap 16, API key)"
 ( cd "$REPO/ssc-broker" && UPSTREAM_LLM_BASE=http://127.0.0.1:8000/v1 BROKER_API_KEY=$KEY \
     BROKER_MAX_INFLIGHT=16 QUEUE_WAIT_TIMEOUT=60 \
-    exec uvicorn broker:app --port 8080 --log-level warning ) > "$OUT/broker.log" 2>&1 &
+    exec uvicorn broker:app --port $BROKER_PORT --log-level warning ) > "$OUT/broker.log" 2>&1 &
 BROKER_PID=$!
 trap 'kill $BROKER_PID $VLLM_PID 2>/dev/null || true' EXIT
-wait_http http://127.0.0.1:8080/health 30
+wait_http http://127.0.0.1:$BROKER_PORT/health 30
 
 cd "$REPO/benchmark"
 METRICS=http://127.0.0.1:8000/metrics
@@ -93,7 +101,7 @@ python bench.py --base-url http://127.0.0.1:8000/v1 --concurrency 1,2,4,8,16,32 
   --prompt-tokens 727 --max-tokens 512 --json-out "$OUT/sweep.json"
 
 step "4/5 chat sessions through the broker (cap 16)"
-python sessions.py --base-url http://127.0.0.1:8080/v1 --api-key $KEY \
+python sessions.py --base-url http://127.0.0.1:$BROKER_PORT/v1 --api-key $KEY \
   --sessions 10,20,50,80 --duration "$SESSION_SECONDS" --metrics-url $METRICS \
   --label "via broker, cap 16" --json-out "$OUT/sessions_broker.json"
 
