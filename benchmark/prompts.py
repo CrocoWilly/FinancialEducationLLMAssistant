@@ -4,8 +4,9 @@ Production-shaped chat prompts for benchmarks.
 The production chatflow sent: the system prompt below, with ~4 retrieved
 knowledge-base chunks inserted at {context}, plus the user's question.
 The real chunks came from copyrighted course notes, so the context here is
-original filler text about the same topics; only its *length* matters for
-serving performance (prefill cost and KV-cache size).
+original filler text about the same topics, shuffled per request. Its length
+sets the prefill cost and KV-cache size; shuffling keeps prompts distinct, as
+real retrieved chunks are, so vLLM's prefix cache can't share them.
 
 Length is controlled in characters and calibrated to tokens of the
 ssc-FinLLM / InternLM2 tokenizer measured *after* the broker's 繁→簡 conversion
@@ -70,14 +71,16 @@ def build_messages(prompt_tokens: int, rng: random.Random | None = None) -> list
     question = rng.choice(QUESTIONS)
     base = SYSTEM_PROMPT.replace("{context}", "") + question
     target_chars = int(prompt_tokens * CHARS_PER_TOKEN) - len(base)
-    parts, n = [], 0
-    start = rng.randrange(len(CONTEXT_SENTENCES))
-    i = start
+    # Shuffle on every call so prompts differ from the first context sentence on.
+    # A fixed order makes most prompts identical, and vLLM's prefix cache then
+    # shares their KV blocks, which real retrieved chunks would not allow.
+    parts, n, pool = [], 0, []
     while n < target_chars:
-        s = CONTEXT_SENTENCES[i % len(CONTEXT_SENTENCES)]
+        if not pool:
+            pool = rng.sample(CONTEXT_SENTENCES, len(CONTEXT_SENTENCES))
+        s = pool.pop()
         parts.append(s)
         n += len(s)
-        i += 1
     context = "".join(parts)[:max(target_chars, 0)]
     return [
         {"role": "system", "content": SYSTEM_PROMPT.replace("{context}", context)},
