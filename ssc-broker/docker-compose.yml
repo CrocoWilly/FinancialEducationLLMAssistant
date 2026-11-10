@@ -6,7 +6,7 @@ services:
     environment:
       - UPSTREAM_LLM_BASE=${UPSTREAM_LLM_BASE:?set UPSTREAM_LLM_BASE in ssc-broker/.env}
       - BROKER_API_KEY=${BROKER_API_KEY:?set BROKER_API_KEY in ssc-broker/.env}
-      - BROKER_MAX_INFLIGHT=16
+      - BROKER_MAX_INFLIGHT=32
       - RATE_LIMIT_SECONDS=0
       - QUEUE_WAIT_TIMEOUT=60
       - UPSTREAM_CONNECT_TIMEOUT=10

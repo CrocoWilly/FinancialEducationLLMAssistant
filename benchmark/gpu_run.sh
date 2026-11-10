@@ -9,7 +9,7 @@
 # Optional env: HF_REPO, WORK (default /workspace), VLLM_VERSION (default: latest),
 #               SESSION_SECONDS (default 180), SKIP_INSTALL=1,
 #               BROKER_PORT (default 8090; 8080 is often taken by Jupyter on rented boxes),
-#               BROKER_CAP (broker's in-flight cap, default 16),
+#               BROKER_CAP (broker's in-flight cap, default 32 like the broker),
 #               MOCK=1 (dry run without a GPU: mock vLLM instead of the real one),
 #               STAGES (default "single sweep sessions direct"; add "stress" for the
 #                       overload tests, e.g. SKIP_INSTALL=1 STAGES=stress on a box
@@ -29,7 +29,7 @@ KEY=bench-key
 STAGES=${STAGES:-single sweep sessions direct}
 has() { [[ " $STAGES " == *" $1 "* ]]; }
 BROKER_PORT=${BROKER_PORT:-8090}
-BROKER_CAP=${BROKER_CAP:-16}            # broker's BROKER_MAX_INFLIGHT
+BROKER_CAP=${BROKER_CAP:-32}            # broker's BROKER_MAX_INFLIGHT
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/run.log") 2>&1
 ulimit -n 65536 2>/dev/null || true   # hundreds of concurrent connections

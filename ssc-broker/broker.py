@@ -13,7 +13,8 @@ UP = os.getenv("UPSTREAM_LLM_BASE", "http://127.0.0.1:8000/v1").rstrip("/")
 # 你的上游唯一模型名稱（Dify 會亂丟 gpt-4o-mini；這裡統一蓋掉）
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "ssc-FinLLM")
 
-MAX_INF   = int(os.getenv("BROKER_MAX_INFLIGHT", "16"))
+# 32：RTX 3090 + ssc-FinLLM 7B 實測，比 16 和不設上限都好（見 README「GPU benchmark」）
+MAX_INF   = int(os.getenv("BROKER_MAX_INFLIGHT", "32"))
 RL_SECS   = float(os.getenv("RATE_LIMIT_SECONDS", "0"))
 Q_TIMEOUT = float(os.getenv("QUEUE_WAIT_TIMEOUT", "60"))
 

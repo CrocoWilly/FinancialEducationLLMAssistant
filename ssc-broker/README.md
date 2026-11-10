@@ -20,7 +20,7 @@ Set via environment variables. `docker-compose.yml` values override the `Dockerf
 | `UPSTREAM_LLM_BASE` | from `.env` | `http://127.0.0.1:8000/v1` | vLLM base URL, must include `/v1`, no trailing slash |
 | `BROKER_API_KEY` | from `.env` (required) | – (empty = no auth, logs a warning) | Clients must send `Authorization: Bearer <key>` to `/v1/*` |
 | `DEFAULT_MODEL` | – | `ssc-FinLLM` (in code) | Model name forced on every request |
-| `BROKER_MAX_INFLIGHT` | `16` | `8` | Max concurrent upstream requests |
+| `BROKER_MAX_INFLIGHT` | `32` | `32` | Max concurrent upstream requests (32 measured best on one RTX 3090; size it to your GPU's KV cache) |
 | `RATE_LIMIT_SECONDS` | `0` (off) | `0` (off) | Min seconds between requests per client IP — keep off behind Dify (see below) |
 | `QUEUE_WAIT_TIMEOUT` | `60` | `45` | Seconds to wait for a concurrency slot |
 | `UPSTREAM_CONNECT_TIMEOUT` | `10` | `10` | Seconds to connect to vLLM |
