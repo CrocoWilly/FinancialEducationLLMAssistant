@@ -64,6 +64,9 @@ The limit is 32. I chose it by testing three settings on the GPU ([details](#wha
 - **No limit was too loose.** Under heavy load the GPU ran out of memory, and vLLM had to pause answers and redo them, which slowed everyone down.
 - **32 was the fastest of the three.**
 
+**Why a per-user rate limit on top of the cap?**
+The cap protects the GPU but doesn't care who holds the slots, so one script sending requests nonstop could fill all 32 and push everyone else into the queue. Each user therefore gets a token bucket (10 requests per minute, bursts of 5), checked before queueing, so a limited request gets `429` with `Retry-After` and never takes a slot. The broker only ever sees Dify's IP, but Dify puts its end-user ID in the request's `user` field, so the limit can still be per user. [Details](ssc-broker/README.md#note-on-rate-limiting).
+
 **Why Tailscale between EC2 and the home PC?**
 The GPU machine needs no public port or router configuration. Traffic goes through an encrypted WireGuard tunnel, and EC2 reaches the PC at a stable private address. Running the GPU at home avoids paying for a cloud GPU around the clock.
 
@@ -274,7 +277,7 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-31 tests in [`tests/test_broker.py`](tests/test_broker.py) run in about 15 s and need no GPU. GitHub Actions runs them on every push and pull request. Each test starts a real broker and mock vLLM on free local ports and talks to them over HTTP, so streaming, timeouts and disconnects go through the same code paths as in production. The logging tests go one step further and launch `uvicorn` as a separate process, because a missing log handler only shows up there.
+38 tests in [`tests/test_broker.py`](tests/test_broker.py) run in about 18 s and need no GPU. GitHub Actions runs them on every push to `main` and on every pull request. Each test starts a real broker and mock vLLM on free local ports and talks to them over HTTP, so streaming, timeouts and disconnects go through the same code paths as in production. The logging tests go one step further and launch `uvicorn` as a separate process, because a missing log handler only shows up there.
 
 | Area | What is checked |
 |---|---|
@@ -282,18 +285,18 @@ pytest -v
 | Language | input 繁→簡, output 簡→繁 (stream and non-stream) |
 | Concurrency | cap never exceeded; slots returned after normal completion, upstream errors and client disconnects; over-release raises instead of silently raising the cap; `503` when the queue is full |
 | Failures | `502` unreachable upstream, upstream status passed through, `504` timeout, SSE error event on mid-stream timeout |
-| Rate limit | `429` inside the window |
+| Rate limit | token bucket burst, refill and pruning (fake clock); `429` + `Retry-After` over the limit; separate buckets per Dify user, IP fallback without one; a limited request never reaches the GPU |
 | Auth | `401` without / with a wrong key on `/v1/*`; correct key accepted; `/health` and Dify probe stay open; rejected requests never reach the GPU or take a slot |
 | Logging | request log lines and the missing-key warning actually appear in uvicorn's output |
 
-To check that the tests actually catch bugs, I ran them against the original `broker.py` (19 of 31 fail, each matching a known bug or a feature it lacked). I also deliberately broke each slot-release path, the API-key check and the log handler in the fixed broker; every one of those changes is caught by at least one test.
+To check that the tests actually catch bugs, I ran them against the original `broker.py` (19 of the 31 tests at the time failed, each matching a known bug or a feature it lacked). I also deliberately broke each slot-release path, the API-key check, the log handler and the rate limiter (keying, `Retry-After`, refill, pruning) in the fixed broker; every one of those changes is caught by at least one test.
 
 ## Limitations & next steps
 
 - **The broker's limit counts requests, not their size.** 32 suits this GPU and these prompts. A different GPU or much longer prompts would need a new value. A smarter limit would count tokens against the GPU's free memory instead.
 - **The prompt order makes it hard for vLLM to reuse work.** The fixed instructions come after the course notes. Moving them to the front would let vLLM reuse them for every request.
 - **Retries:** failed upstream calls are not retried. A retry is only safe before streaming starts.
-- **Rate limiting:** the broker only sees Dify's IP, so its per-IP limit would throttle all users together; it is off by default. Per-user limits should be set in Nginx (which sees client IPs; its config lives in the Dify deployment on EC2, not in this repo) or in Dify. The limiter's per-IP table is also in-memory and never pruned.
+- **Rate limiting:** users are told apart by the `user` field Dify sends. I confirmed this in Dify's source, not yet in production logs. Dify's web-app users are anonymous, one ID per browser, so someone who clears cookies gets a fresh bucket. Limits by real client IP would go in Nginx, whose config lives in the Dify deployment on EC2, not in this repo.
 - **Multiple workers / instances:** the concurrency cap and rate limit are per process, so N uvicorn workers allow N × `BROKER_MAX_INFLIGHT`. A shared cap would need Redis or similar.
 - **Reproducibility:** Dify ran as the stock 1.8.1 Docker deployment with two changes: `OPENAI_API_BASE=http://broker:8080` in `.env`, and `extra_hosts: host.docker.internal:host-gateway` on the `api`, `worker` and `worker_beat` services. vLLM ran with `--dtype float16 --max-model-len 4096 --trust-remote-code` and default memory settings; the full command is in [`benchmark/README.md`](benchmark/README.md), and the benchmark's versions are in [`env.txt`](benchmark/results/rtx3090-2026-11-10/env.txt).
 

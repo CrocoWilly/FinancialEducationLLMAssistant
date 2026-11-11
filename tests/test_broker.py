@@ -23,9 +23,13 @@ SIMPLIFIED_QUESTION = "债券的风险是什么"
 
 # ---------- helpers ----------
 
-def chat_body(*, stream, max_tokens=20, text=TRADITIONAL_QUESTION, model="gpt-4o-mini"):
-    return {"model": model, "stream": stream, "max_tokens": max_tokens,
+def chat_body(*, stream, max_tokens=20, text=TRADITIONAL_QUESTION, model="gpt-4o-mini",
+              user=None):
+    body = {"model": model, "stream": stream, "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": text}]}
+    if user is not None:
+        body["user"] = user   # Dify sends its end-user ID here
+    return body
 
 
 def read_stream(response) -> tuple[str, list[dict]]:
@@ -208,10 +212,66 @@ def test_upstream_timeout_mid_stream_ends_with_error_event(upstream, start_broke
 
 # ---------- rate limit ----------
 
-def test_second_request_within_rate_limit_window_returns_429(upstream, start_broker):
-    base = start_broker(upstream.url, rate_limit=10)
+# The limiter itself, with a fake clock (no sleeping, exact numbers).
+
+def test_limiter_allows_a_burst_then_blocks():
+    limiter = broker.TokenBucketLimiter(per_min=60, burst=3)
+    assert [limiter.hit("alice", now=0.0) for _ in range(3)] == [0.0, 0.0, 0.0]
+    assert limiter.hit("alice", now=0.0) > 0
+
+
+def test_limiter_refills_at_the_configured_rate():
+    limiter = broker.TokenBucketLimiter(per_min=60, burst=1)   # 1 token per second
+    assert limiter.hit("alice", now=0.0) == 0.0
+    assert limiter.hit("alice", now=0.5) == pytest.approx(0.5)  # half a token left to wait for
+    assert limiter.hit("alice", now=1.0) == 0.0
+
+
+def test_limiter_keys_do_not_share_tokens():
+    limiter = broker.TokenBucketLimiter(per_min=60, burst=1)
+    assert limiter.hit("alice", now=0.0) == 0.0
+    assert limiter.hit("alice", now=0.0) > 0
+    assert limiter.hit("bob", now=0.0) == 0.0
+
+
+def test_limiter_prune_drops_only_idle_users():
+    limiter = broker.TokenBucketLimiter(per_min=60, burst=2)   # full again 2 s after last use
+    limiter.hit("idle", now=0.0)
+    limiter.hit("active", now=9.5)
+    limiter.prune(now=10.0)
+    assert set(limiter.buckets) == {"active"}
+
+
+# Through the broker, over HTTP.
+
+def test_requests_over_the_limit_get_429_with_retry_after(upstream, start_broker):
+    base = start_broker(upstream.url, rate_per_min=6, rate_burst=2)
+    assert chat(base, stream=False, user="alice")[0] == 200
+    assert chat(base, stream=False, user="alice")[0] == 200
+    with httpx.Client(timeout=10) as client:
+        r = client.post(f"{base}/chat/completions", json=chat_body(stream=False, user="alice"))
+    assert r.status_code == 429
+    assert int(r.headers["Retry-After"]) >= 1
+
+
+def test_rate_limit_is_per_dify_user(upstream, start_broker):
+    base = start_broker(upstream.url, rate_per_min=6, rate_burst=1)
+    assert chat(base, stream=False, user="alice")[0] == 200
+    assert chat(base, stream=False, user="alice")[0] == 429
+    assert chat(base, stream=False, user="bob")[0] == 200
+
+
+def test_requests_without_user_fall_back_to_client_ip(upstream, start_broker):
+    base = start_broker(upstream.url, rate_per_min=6, rate_burst=1)
     assert chat(base, stream=False)[0] == 200
     assert chat(base, stream=False)[0] == 429
+
+
+def test_rate_limited_request_never_reaches_the_gpu(upstream, start_broker):
+    base = start_broker(upstream.url, rate_per_min=6, rate_burst=1)
+    chat(base, stream=False, user="alice")
+    assert chat(base, stream=False, user="alice")[0] == 429
+    assert mock_upstream.stats["total"] == 1
 
 
 # ---------- API key ----------

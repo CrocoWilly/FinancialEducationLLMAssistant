@@ -7,7 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY broker.py /app/broker.py
 ENV UPSTREAM_LLM_BASE=http://127.0.0.1:8000/v1 \
     BROKER_MAX_INFLIGHT=32 \
-    RATE_LIMIT_SECONDS=0 \
+    RATE_LIMIT_PER_MIN=0 \
+    RATE_LIMIT_BURST=5 \
     QUEUE_WAIT_TIMEOUT=45 \
     UPSTREAM_CONNECT_TIMEOUT=10 \
     UPSTREAM_READ_TIMEOUT=120

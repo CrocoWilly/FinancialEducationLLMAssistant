@@ -76,7 +76,7 @@ def start_broker(monkeypatch):
     servers = []
 
     def _start(upstream_url, *, max_inflight=4, queue_timeout=5.0,
-               read_timeout=10.0, rate_limit=0.0, api_key=""):
+               read_timeout=10.0, rate_per_min=0.0, rate_burst=5, api_key=""):
         monkeypatch.setattr(broker, "API_KEY", api_key, raising=False)
         monkeypatch.setattr(broker, "UP", upstream_url + "/v1")
         monkeypatch.setattr(broker, "MAX_INF", max_inflight)
@@ -84,8 +84,7 @@ def start_broker(monkeypatch):
         monkeypatch.setattr(broker, "sem", type(broker.sem)(max_inflight))
         monkeypatch.setattr(broker, "Q_TIMEOUT", queue_timeout)
         monkeypatch.setattr(broker, "UP_READ_TIMEOUT", read_timeout, raising=False)
-        monkeypatch.setattr(broker, "RL_SECS", rate_limit)
-        broker.last_req.clear()
+        monkeypatch.setattr(broker, "limiter", broker.TokenBucketLimiter(rate_per_min, rate_burst))
         server = ServerThread(broker.app).start()
         servers.append(server)
         return server.url + "/v1"

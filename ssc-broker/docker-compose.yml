@@ -7,7 +7,8 @@ services:
       - UPSTREAM_LLM_BASE=${UPSTREAM_LLM_BASE:?set UPSTREAM_LLM_BASE in ssc-broker/.env}
       - BROKER_API_KEY=${BROKER_API_KEY:?set BROKER_API_KEY in ssc-broker/.env}
       - BROKER_MAX_INFLIGHT=32
-      - RATE_LIMIT_SECONDS=0
+      - RATE_LIMIT_PER_MIN=10      # per Dify user; see README "Note on rate limiting"
+      - RATE_LIMIT_BURST=5
       - QUEUE_WAIT_TIMEOUT=60
       - UPSTREAM_CONNECT_TIMEOUT=10
       - UPSTREAM_READ_TIMEOUT=120

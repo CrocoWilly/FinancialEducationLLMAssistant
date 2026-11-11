@@ -1,4 +1,4 @@
-import os, time, asyncio, orjson, logging, hmac
+import os, time, math, asyncio, orjson, logging, hmac
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any
 import httpx
@@ -15,7 +15,9 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "ssc-FinLLM")
 
 # 32：RTX 3090 + ssc-FinLLM 7B 實測，比 16 和不設上限都好（見 README「GPU benchmark」）
 MAX_INF   = int(os.getenv("BROKER_MAX_INFLIGHT", "32"))
-RL_SECS   = float(os.getenv("RATE_LIMIT_SECONDS", "0"))
+# 每位使用者的限速（token bucket）：平均每分鐘幾次、最多可連發幾次；PER_MIN=0 = 關閉
+RL_PER_MIN = float(os.getenv("RATE_LIMIT_PER_MIN", "0"))
+RL_BURST   = int(os.getenv("RATE_LIMIT_BURST", "5"))
 Q_TIMEOUT = float(os.getenv("QUEUE_WAIT_TIMEOUT", "60"))
 
 # 上游逾時：connect = 連線建立；read = 兩次收到資料之間最多等多久（串流時是每個 chunk 之間）
@@ -25,7 +27,49 @@ UP_READ_TIMEOUT    = float(os.getenv("UPSTREAM_READ_TIMEOUT", "120"))
 cc_t2s = OpenCC("t2s")
 cc_s2t = OpenCC("s2twp")
 
-last_req: Dict[str, float] = {}
+
+class TokenBucketLimiter:
+    """
+    每個 key（使用者）一個桶：最多裝 burst 個 token，每秒補 per_min/60 個。
+    每個請求花 1 個 token；不夠就拒絕，並算出要等幾秒才會有下一個。
+    semaphore 保護 GPU，這裡負責使用者之間的公平：一個人狂刷也佔不滿所有名額。
+    """
+
+    PRUNE_EVERY = 60.0  # 秒
+
+    def __init__(self, per_min: float, burst: int):
+        self.rate = per_min / 60.0
+        self.burst = max(1, burst)
+        self.buckets: Dict[str, tuple] = {}  # key -> (剩餘 token, 上次更新時間)
+        self._last_prune = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return self.rate > 0
+
+    def _tokens(self, key: str, now: float) -> float:
+        tokens, last = self.buckets.get(key, (self.burst, now))
+        return min(self.burst, tokens + (now - last) * self.rate)
+
+    def hit(self, key: str, now: float) -> float:
+        """花 1 個 token。放行回傳 0；被擋回傳還要等幾秒。"""
+        if now - self._last_prune >= self.PRUNE_EVERY:
+            self.prune(now)
+        tokens = self._tokens(key, now)
+        if tokens >= 1:
+            self.buckets[key] = (tokens - 1, now)
+            return 0.0
+        self.buckets[key] = (tokens, now)
+        return (1 - tokens) / self.rate
+
+    def prune(self, now: float) -> None:
+        """丟掉已經補滿的桶（閒置夠久的使用者），記錄表才不會無限長大。"""
+        self._last_prune = now
+        self.buckets = {k: v for k, v in self.buckets.items()
+                        if self._tokens(k, now) < self.burst}
+
+
+limiter = TokenBucketLimiter(RL_PER_MIN, RL_BURST)
 # Bounded：若名額被多還（release 次數超過 acquire），直接丟 ValueError，
 # 而不是默默讓上限變大
 sem = asyncio.BoundedSemaphore(MAX_INF)
@@ -161,18 +205,23 @@ def _convert_chunk(payload: str) -> str:
 
 # ---------- 內部實作：POST chat/completions ----------
 async def _chat_impl(req: Request):
-    ip = req.client.host if req.client else "unknown"
-    now = time.monotonic()
-
-    # 每 IP 簡易節流
-    if RL_SECS > 0 and (now - last_req.get(ip, 0.0) < RL_SECS):
-        return JSONResponse({"error": "rate_limited"}, status_code=429)
-    last_req[ip] = now
-
     try:
         body = await req.json()
     except Exception:
         return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    # 每位使用者限速：Dify 會在 body 的 user 欄位帶 end-user ID；沒有就退回用來源 IP。
+    # 放在排隊之前，被擋的請求不會佔用 GPU 名額。
+    if limiter.enabled:
+        user = body.get("user") if isinstance(body, dict) else None
+        if isinstance(user, str) and user:
+            key = "user:" + user
+        else:
+            key = "ip:" + (req.client.host if req.client else "unknown")
+        wait = limiter.hit(key, time.monotonic())
+        if wait > 0:
+            return JSONResponse({"error": "rate_limited"}, status_code=429,
+                                headers={"Retry-After": str(math.ceil(wait))})
 
     # 1) 統一模型名稱（避免 Dify 用 gpt-* 測試導致上游 404）
     body["model"] = DEFAULT_MODEL

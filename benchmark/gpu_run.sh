@@ -90,7 +90,7 @@ grep -i -E "KV cache|GPU blocks|maximum concurrency|Memory profiling" "$OUT/vllm
 
 step "start broker (cap $BROKER_CAP, API key)"
 ( cd "$REPO/ssc-broker" && UPSTREAM_LLM_BASE=http://127.0.0.1:8000/v1 BROKER_API_KEY=$KEY \
-    BROKER_MAX_INFLIGHT=$BROKER_CAP QUEUE_WAIT_TIMEOUT=60 \
+    BROKER_MAX_INFLIGHT=$BROKER_CAP QUEUE_WAIT_TIMEOUT=60 RATE_LIMIT_PER_MIN=0 \
     exec uvicorn broker:app --port $BROKER_PORT --log-level warning ) > "$OUT/broker.log" 2>&1 &
 BROKER_PID=$!
 trap 'kill $BROKER_PID $VLLM_PID 2>/dev/null || true' EXIT
