@@ -4,7 +4,7 @@
 
 A Traditional-Chinese financial Q&A assistant: a web/mobile chat UI on AWS, answering in real time from a 7B financial LLM running on a home GPU.
 
-> **Status:** ran in September 2025 and was used by 8 people ([numbers below](#in-production-september-2025)). The GPU machine has since been retired, so the live deployment is offline; the demo video, the broker, and its tests remain.
+> **Status:** ran for two days in September 2025 and was used by about 10 people ([numbers below](#in-production-september-2025)). The GPU machine has since been retired, so the live deployment is offline; the demo video, the broker, and its tests remain.
 
 ## TL;DR
 
@@ -26,7 +26,7 @@ Click the screenshot to watch the real-time demo ([short link](https://reurl.cc/
 
 ```mermaid
 flowchart LR
-    U[Browser<br/>web / mobile] -->|HTTPS| D
+    U[Browser<br/>web / mobile] -->|HTTP| D
 
     subgraph EC2[AWS EC2 · Docker]
         D[Dify v1.8.1<br/>Nginx + UI + API] -->|OpenAI-compatible<br/>HTTP + SSE| B[ssc-broker<br/>FastAPI · my code]
@@ -122,7 +122,8 @@ The app ran for two days in September 2025. These numbers come from Dify's datab
 
 | | |
 |---|---|
-| People who asked questions | 8 (10 test accounts) |
+| Browsers that opened the app | 10 (anonymous, so one person can count twice) |
+| Who asked questions | 7 of those browsers, plus my own tests in Dify's console |
 | Conversations / answers | 20 / 61 |
 | Most people using it at the same time | 2–3 |
 | Requests through the broker | 75, all successful |
@@ -295,6 +296,7 @@ To check that the tests actually catch bugs, I ran them against the original `br
 
 - **The broker's limit counts requests, not their size.** 32 suits this GPU and these prompts. A different GPU or much longer prompts would need a new value. A smarter limit would count tokens against the GPU's free memory instead.
 - **The prompt order makes it hard for vLLM to reuse work.** The fixed instructions come after the course notes. Moving them to the front would let vLLM reuse them for every request.
+- **No TLS:** the September 2025 deployment served Dify over plain HTTP on port 80 (`NGINX_HTTPS_ENABLED=false`). A public launch would need a domain and a certificate on Nginx.
 - **Retries:** failed upstream calls are not retried. A retry is only safe before streaming starts.
 - **Rate limiting:** users are told apart by the `user` field Dify sends. I confirmed this in Dify's source, not yet in production logs. Dify's web-app users are anonymous, one ID per browser, so someone who clears cookies gets a fresh bucket. Limits by real client IP would go in Nginx, whose config lives in the Dify deployment on EC2, not in this repo.
 - **Multiple workers / instances:** the concurrency cap and rate limit are per process, so N uvicorn workers allow N × `BROKER_MAX_INFLIGHT`. A shared cap would need Redis or similar.
