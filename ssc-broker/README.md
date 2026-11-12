@@ -33,7 +33,7 @@ The concurrency cap protects the GPU; the rate limit keeps one user from taking 
 
 Users are told apart by the request's `user` field. Dify fills it with its end-user ID when it calls an OpenAI-compatible model (`user=user_id` in Dify 1.8.1's LLM node; `data["user"] = user` in the plugin SDK). Requests without it fall back to the client IP, which behind Dify is the Dify container, so they share one bucket. Idle buckets are pruned once a minute.
 
-The code default is off, so local load tests (one IP, no `user` field) aren't throttled; `docker-compose.yml` turns it on for production. A real student pauses about 24 s between questions (median in production), so 10 per minute with a burst of 5 only stops scripted traffic.
+The code default is off, so local load tests (one IP, no `user` field) aren't throttled; `docker-compose.yml` turns it on for production. The people who used the live app paused about 24 s between questions (median, September 2025), so 10 per minute with a burst of 5 only stops scripted traffic.
 
 ## Error responses
 

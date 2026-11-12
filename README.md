@@ -4,7 +4,7 @@
 
 A Traditional-Chinese financial Q&A assistant: a web/mobile chat UI on AWS, answering in real time from a 7B financial LLM running on a home GPU.
 
-> **Status:** ran in September 2025 and was used by 8 people ([numbers below](#in-production-september-2025)). The GPU machine has since been retired, so the live deployment is offline; the demo video, the broker, and its tests remain.
+> **Status:** ran for two days in September 2025 and was used by about 10 people ([numbers below](#in-production-september-2025)). The GPU machine has since been retired, so the live deployment is offline; the demo video, the broker, and its tests remain.
 
 ## TL;DR
 
@@ -24,22 +24,7 @@ Click the screenshot to watch the real-time demo ([short link](https://reurl.cc/
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    U[Browser<br/>web / mobile] -->|HTTPS| D
-
-    subgraph EC2[AWS EC2 · Docker]
-        D[Dify v1.8.1<br/>Nginx + UI + API] -->|OpenAI-compatible<br/>HTTP + SSE| B[ssc-broker<br/>FastAPI · my code]
-    end
-
-    B -->|Tailscale<br/>private tunnel| V
-
-    subgraph PC[Home PC · RTX 3090]
-        V[vLLM<br/>ssc-FinLLM 7B FP16]
-    end
-
-    V -.->|token stream| B -.->|簡→繁 per chunk| D -.-> U
-```
+![System architecture: users reach Dify on AWS EC2 over HTTP; Dify calls the FastAPI broker, which forwards to vLLM on a home RTX 3090 over Tailscale and streams tokens back](./doc_image/system_arch.png)
 
 | Component | Role | Source |
 |---|---|---|
@@ -47,6 +32,10 @@ flowchart LR
 | **ssc-broker** | Protocol adapter, 繁↔簡 conversion, concurrency control, timeouts, error mapping | **[`ssc-broker/`](ssc-broker/)** |
 | vLLM | Serves the model over an OpenAI-compatible API with token streaming | [vllm-project/vllm](https://github.com/vllm-project/vllm) |
 | ssc-FinLLM 7B | Chinese financial LLM (InternLM2 architecture, FP16) | [haidizym/ssc-FinLLM](https://github.com/haidizym/ssc-FinLLM) |
+
+Inside the broker, each `POST /v1/chat/completions` goes through these steps; each step that can fail returns its own error:
+
+![Broker request lifecycle: Auth (401) → Rate Limit (429) → Prepare → Acquire Slot (503) → Forward (502/504) → Stream back (SSE error)](./doc_image/api_flow.png)
 
 ## Design decisions
 
@@ -80,11 +69,10 @@ Connect and read timeouts are separate. The read timeout applies *between chunks
 
 The Dify app 「金融知識小幫手」 is a chatflow: **start → knowledge retrieval → LLM → answer**.
 
-- **Knowledge:** three personal-finance course notes (introduction, time value of money, annuities), split into 262 chunks. Retrieval is Dify's *economy* mode, a keyword index without embeddings, returning the top 4 chunks.
+- **Knowledge:** three personal-finance course notes (introduction, time value of money, annuities), split into chunks (`\n\n`, up to 1024 characters, 50 overlap). Retrieval is vector search with OpenAI's `text-embedding-3-large`, returning the top 4 chunks.
+- **Why vector search:** the app first ran on Dify's keyword index. A retrieval test showed it often returned off-topic chunks (「什麼是年金」 matched on 「什麼」), so I switched to vector search. Embeddings use OpenAI's API instead of a local model so the RTX 3090's memory stays free for the 7B model's KV cache.
 - **LLM step:** ssc-FinLLM through the broker, temperature 0.7, max 512 tokens, with the retrieved chunks injected into the system prompt.
 - **System prompt rules:** answer in Traditional Chinese, step by step; show the assumptions and steps for any calculation; if the retrieved excerpts don't support an answer, say 「資料不足」 and list what information is missing; no investment solicitation, return guarantees, or stock tips.
-
-**What went wrong with vector search.** I first built a second knowledge base in *high-quality* mode with `text-embedding-3-large`. All three documents failed to index with `404 {"detail": "Not Found"}`. That body is FastAPI's default 404, which points to the cause: Dify's `OPENAI_API_BASE` was set to the broker, so the embedding calls most likely went to the broker, which only implements chat endpoints. I switched to the keyword-indexed knowledge base, which is what the app ran with. The fix for vector search would be to point embeddings at a real embedding endpoint, or add `/v1/embeddings` to the broker.
 
 ## Case study: a concurrency cap that didn't cap
 
@@ -122,15 +110,14 @@ The app ran for two days in September 2025. These numbers come from Dify's datab
 
 | | |
 |---|---|
-| People who asked questions | 8 (10 test accounts) |
+| Browsers that opened the app | 10 (anonymous, so one person can count twice) |
+| Who asked questions | 7 of those browsers, plus my own tests in Dify's console |
 | Conversations / answers | 20 / 61 |
 | Most people using it at the same time | 2–3 |
 | Requests through the broker | 75, all successful |
 | Time to get a full answer | about 5 s (median) |
 
 How these people used the app also shaped the GPU test below: they waited about 24 seconds between questions, and a typical answer was short (about 75 tokens).
-
-**Dify counts tokens about twice too high.** I first reported ~61 tokens/s from Dify's logs. When I recounted with the model's own tokenizer, Dify's numbers turned out about 2× too high (a typical prompt: 727 by Dify's count, 377 actually). The speed measured on a real GPU is 52.9 tokens/s.
 
 ## Performance
 
@@ -162,7 +149,7 @@ A script ([`sessions.py`](benchmark/sessions.py)) plays many users at once. Each
 3. pauses for about 24 seconds, like the real users did,
 4. and asks again.
 
-Each test runs for 3 minutes, with 10 to 300 users. To be safe, the test prompts are about twice as long as real ones, so real traffic should do a little better than the numbers here.
+Each test runs for 3 minutes, with 10 to 300 users. Each request sends a 727-token prompt (instructions, course notes retrieved by RAG, and the question), about twice the length of a typical real one (377 tokens). Longer prompts mean more work for the GPU, so real traffic should do a little better than the numbers here.
 
 One script, [`gpu_run.sh`](benchmark/gpu_run.sh), runs the whole test. The raw results are in [`benchmark/results/`](benchmark/results/rtx3090-2026-11-10/).
 
@@ -295,6 +282,7 @@ To check that the tests actually catch bugs, I ran them against the original `br
 
 - **The broker's limit counts requests, not their size.** 32 suits this GPU and these prompts. A different GPU or much longer prompts would need a new value. A smarter limit would count tokens against the GPU's free memory instead.
 - **The prompt order makes it hard for vLLM to reuse work.** The fixed instructions come after the course notes. Moving them to the front would let vLLM reuse them for every request.
+- **No TLS:** the September 2025 deployment served Dify over plain HTTP on port 80 (`NGINX_HTTPS_ENABLED=false`). A public launch would need a domain and a certificate on Nginx.
 - **Retries:** failed upstream calls are not retried. A retry is only safe before streaming starts.
 - **Rate limiting:** users are told apart by the `user` field Dify sends. I confirmed this in Dify's source, not yet in production logs. Dify's web-app users are anonymous, one ID per browser, so someone who clears cookies gets a fresh bucket. Limits by real client IP would go in Nginx, whose config lives in the Dify deployment on EC2, not in this repo.
 - **Multiple workers / instances:** the concurrency cap and rate limit are per process, so N uvicorn workers allow N × `BROKER_MAX_INFLIGHT`. A shared cap would need Redis or similar.
